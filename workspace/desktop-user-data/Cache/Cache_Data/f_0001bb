@@ -1,0 +1,203 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/app/settings/uninstall-section.js");const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"]; const _jsxs = __vite__cjsImport0_react_jsxRuntime["jsxs"];const useEffect = __vite__cjsImport1_react["useEffect"]; const useState = __vite__cjsImport1_react["useState"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import __vite__cjsImport1_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { Button } from "/src/components/ui/button.js";
+import { AlertTriangle, Loader2, Trash2 } from "/src/lib/icons.js";
+import { cn } from "/src/lib/utils.js";
+import { SectionHeading } from "/src/app/settings/primitives.js";
+var _s = $RefreshSig$();
+const OPTIONS = [
+	{
+		mode: "gui",
+		title: "Uninstall Chat GUI only",
+		description: "Remove this desktop app. The Hermes agent, your config, and chats all stay.",
+		consequence: "the desktop Chat GUI (this app and its data)",
+		needsAgent: false
+	},
+	{
+		mode: "lite",
+		title: "Uninstall GUI + agent, keep my data",
+		description: "Remove the app and the Hermes agent, but keep config, chats, and secrets for a future reinstall.",
+		consequence: "the Chat GUI and the Hermes agent (config, chats, and secrets are kept)",
+		needsAgent: true
+	},
+	{
+		mode: "full",
+		title: "Uninstall everything",
+		description: "Remove the app, the agent, and all user data — config, chats, scheduled jobs, secrets, logs.",
+		consequence: "EVERYTHING — the Chat GUI, the Hermes agent, and all of your config, chats, secrets, and logs",
+		// full removes the agent (and user data), so it's an agent-removing option:
+		// hide it on a lite client with no local agent, same as lite. A lite client
+		// connecting to a remote backend has no local agent OR local user data the
+		// GUI installed, so gui-only is the correct (and only) option there.
+		needsAgent: true
+	}
+];
+export function UninstallSection() {
+	_s();
+	const [summary, setSummary] = useState(null);
+	const [loading, setLoading] = useState(true);
+	const [pending, setPending] = useState(null);
+	const [running, setRunning] = useState(false);
+	const [error, setError] = useState(null);
+	useEffect(() => {
+		let alive = true;
+		const bridge = window.hermesDesktop?.uninstall;
+		if (!bridge) {
+			setLoading(false);
+			return;
+		}
+		void bridge.summary().then((result) => {
+			if (alive) {
+				setSummary(result);
+			}
+		}).catch(() => {
+			// Non-fatal — we degrade to offering the GUI-only option.
+		}).finally(() => {
+			if (alive) {
+				setLoading(false);
+			}
+		});
+		return () => {
+			alive = false;
+		};
+	}, []);
+	const bridge = window.hermesDesktop?.uninstall;
+	if (!bridge) {
+		return null;
+	}
+	// Gate the agent-removing options on whether an agent is actually present.
+	// A future lite client that ships without the bundled agent shows GUI-only.
+	const agentInstalled = summary?.agent_installed ?? false;
+	const visibleOptions = OPTIONS.filter((opt) => agentInstalled || !opt.needsAgent);
+	const handleConfirm = async () => {
+		if (!pending) {
+			return;
+		}
+		setRunning(true);
+		setError(null);
+		try {
+			const result = await bridge.run(pending);
+			if (!result.ok) {
+				setError(result.message || result.error || "Uninstall could not start.");
+				setRunning(false);
+				setPending(null);
+			}
+		} catch (err) {
+			setError(err instanceof Error ? err.message : String(err));
+			setRunning(false);
+			setPending(null);
+		}
+	};
+	const pendingOption = OPTIONS.find((opt) => opt.mode === pending) ?? null;
+	return _jsxs("div", {
+		className: "mx-auto mt-8 w-full max-w-2xl",
+		children: [_jsx(SectionHeading, {
+			icon: AlertTriangle,
+			title: "Danger zone"
+		}), _jsx("div", {
+			className: "rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3",
+			children: loading ? _jsxs("div", {
+				className: "flex items-center gap-2 py-2 text-sm text-muted-foreground",
+				children: [_jsx(Loader2, { className: "size-3.5 animate-spin" }), "Checking what's installed…"]
+			}) : pendingOption ? _jsxs("div", { children: [
+				_jsx("p", {
+					className: "text-sm font-medium text-destructive",
+					children: "Confirm uninstall"
+				}),
+				_jsxs("p", {
+					className: "mt-1 text-xs text-muted-foreground",
+					children: [
+						"This removes ",
+						pendingOption.consequence,
+						". This can't be undone."
+					]
+				}),
+				summary?.running_app_path && _jsxs("p", {
+					className: "mt-1 font-mono text-[0.68rem] text-muted-foreground/60",
+					children: ["App: ", summary.running_app_path]
+				}),
+				error && _jsx("p", {
+					className: "mt-2 text-xs text-destructive",
+					children: error
+				}),
+				_jsxs("div", {
+					className: "mt-3 flex flex-wrap items-center gap-3",
+					children: [_jsxs(Button, {
+						disabled: running,
+						onClick: () => void handleConfirm(),
+						size: "sm",
+						variant: "destructive",
+						children: [running && _jsx(Loader2, { className: "size-3 animate-spin" }), running ? "Uninstalling…" : "Yes, uninstall"]
+					}), _jsx(Button, {
+						disabled: running,
+						onClick: () => setPending(null),
+						size: "sm",
+						variant: "text",
+						children: "Cancel"
+					})]
+				})
+			] }) : _jsxs("div", {
+				className: "flex flex-col gap-2",
+				children: [
+					_jsx("p", {
+						className: "text-sm font-medium",
+						children: "Uninstall Hermes"
+					}),
+					_jsx("p", {
+						className: "text-xs text-muted-foreground",
+						children: "Choose how much to remove. The app closes to finish the job; reopen the installer any time to come back."
+					}),
+					_jsx("div", {
+						className: "mt-1 flex flex-col gap-2",
+						children: visibleOptions.map((opt) => _jsxs("button", {
+							className: cn("flex items-start gap-3 rounded-lg border border-border/60 bg-background/40 px-3 py-2.5 text-left transition", "hover:border-destructive/40 hover:bg-destructive/5"),
+							onClick: () => {
+								setError(null);
+								setPending(opt.mode);
+							},
+							type: "button",
+							children: [_jsx(Trash2, { className: "mt-0.5 size-4 shrink-0 text-muted-foreground" }), _jsxs("span", {
+								className: "min-w-0",
+								children: [_jsx("span", {
+									className: "block text-sm font-medium text-foreground",
+									children: opt.title
+								}), _jsx("span", {
+									className: "mt-0.5 block text-xs text-muted-foreground",
+									children: opt.description
+								})]
+							})]
+						}, opt.mode))
+					})
+				]
+			})
+		})]
+	});
+}
+_s(UninstallSection, "Vgx+YSpcxtd+y0+bkutcD17Q6Cw=");
+_c = UninstallSection;
+var _c;
+$RefreshReg$(_c, "UninstallSection");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/app/settings/uninstall-section.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/settings/uninstall-section.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/settings/uninstall-section.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/settings/uninstall-section.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,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QUUsR0FBRyxJQUFJLElBQUksQ0FBRTtLQUFFLENBQUM7SUFBQztHQUFFLENBQUM7RUFBRyxDQUFDLENBQUM7Q0FBRSxDQUFDO0FBQ2phIiwibmFtZXMiOltdLCJzb3VyY2VzIjpbInVuaW5zdGFsbC1zZWN0aW9uLmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGpzeCBhcyBfanN4LCBqc3hzIGFzIF9qc3hzIH0gZnJvbSBcInJlYWN0L2pzeC1ydW50aW1lXCI7XG5pbXBvcnQgeyB1c2VFZmZlY3QsIHVzZVN0YXRlIH0gZnJvbSAncmVhY3QnO1xuaW1wb3J0IHsgQnV0dG9uIH0gZnJvbSAnQC9jb21wb25lbnRzL3VpL2J1dHRvbic7XG5pbXBvcnQgeyBBbGVydFRyaWFuZ2xlLCBMb2FkZXIyLCBUcmFzaDIgfSBmcm9tICdAL2xpYi9pY29ucyc7XG5pbXBvcnQgeyBjbiB9IGZyb20gJ0AvbGliL3V0aWxzJztcbmltcG9ydCB7IFNlY3Rpb25IZWFkaW5nIH0gZnJvbSAnLi9wcmltaXRpdmVzJztcbmNvbnN0IE9QVElPTlMgPSBbXG4gICAge1xuICAgICAgICBtb2RlOiAnZ3VpJyxcbiAgICAgICAgdGl0bGU6ICdVbmluc3RhbGwgQ2hhdCBHVUkgb25seScsXG4gICAgICAgIGRlc2NyaXB0aW9uOiAnUmVtb3ZlIHRoaXMgZGVza3RvcCBhcHAuIFRoZSBIZXJtZXMgYWdlbnQsIHlvdXIgY29uZmlnLCBhbmQgY2hhdHMgYWxsIHN0YXkuJyxcbiAgICAgICAgY29uc2VxdWVuY2U6ICd0aGUgZGVza3RvcCBDaGF0IEdVSSAodGhpcyBhcHAgYW5kIGl0cyBkYXRhKScsXG4gICAgICAgIG5lZWRzQWdlbnQ6IGZhbHNlXG4gICAgfSxcbiAgICB7XG4gICAgICAgIG1vZGU6ICdsaXRlJyxcbiAgICAgICAgdGl0bGU6ICdVbmluc3RhbGwgR1VJICsgYWdlbnQsIGtlZXAgbXkgZGF0YScsXG4gICAgICAgIGRlc2NyaXB0aW9uOiAnUmVtb3ZlIHRoZSBhcHAgYW5kIHRoZSBIZXJtZXMgYWdlbnQsIGJ1dCBrZWVwIGNvbmZpZywgY2hhdHMsIGFuZCBzZWNyZXRzIGZvciBhIGZ1dHVyZSByZWluc3RhbGwuJyxcbiAgICAgICAgY29uc2VxdWVuY2U6ICd0aGUgQ2hhdCBHVUkgYW5kIHRoZSBIZXJtZXMgYWdlbnQgKGNvbmZpZywgY2hhdHMsIGFuZCBzZWNyZXRzIGFyZSBrZXB0KScsXG4gICAgICAgIG5lZWRzQWdlbnQ6IHRydWVcbiAgICB9LFxuICAgIHtcbiAgICAgICAgbW9kZTogJ2Z1bGwnLFxuICAgICAgICB0aXRsZTogJ1VuaW5zdGFsbCBldmVyeXRoaW5nJyxcbiAgICAgICAgZGVzY3JpcHRpb246ICdSZW1vdmUgdGhlIGFwcCwgdGhlIGFnZW50LCBhbmQgYWxsIHVzZXIgZGF0YSDigJQgY29uZmlnLCBjaGF0cywgc2NoZWR1bGVkIGpvYnMsIHNlY3JldHMsIGxvZ3MuJyxcbiAgICAgICAgY29uc2VxdWVuY2U6ICdFVkVSWVRISU5HIOKAlCB0aGUgQ2hhdCBHVUksIHRoZSBIZXJtZXMgYWdlbnQsIGFuZCBhbGwgb2YgeW91ciBjb25maWcsIGNoYXRzLCBzZWNyZXRzLCBhbmQgbG9ncycsXG4gICAgICAgIC8vIGZ1bGwgcmVtb3ZlcyB0aGUgYWdlbnQgKGFuZCB1c2VyIGRhdGEpLCBzbyBpdCdzIGFuIGFnZW50LXJlbW92aW5nIG9wdGlvbjpcbiAgICAgICAgLy8gaGlkZSBpdCBvbiBhIGxpdGUgY2xpZW50IHdpdGggbm8gbG9jYWwgYWdlbnQsIHNhbWUgYXMgbGl0ZS4gQSBsaXRlIGNsaWVudFxuICAgICAgICAvLyBjb25uZWN0aW5nIHRvIGEgcmVtb3RlIGJhY2tlbmQgaGFzIG5vIGxvY2FsIGFnZW50IE9SIGxvY2FsIHVzZXIgZGF0YSB0aGVcbiAgICAgICAgLy8gR1VJIGluc3RhbGxlZCwgc28gZ3VpLW9ubHkgaXMgdGhlIGNvcnJlY3QgKGFuZCBvbmx5KSBvcHRpb24gdGhlcmUuXG4gICAgICAgIG5lZWRzQWdlbnQ6IHRydWVcbiAgICB9XG5dO1xuZXhwb3J0IGZ1bmN0aW9uIFVuaW5zdGFsbFNlY3Rpb24oKSB7XG4gICAgY29uc3QgW3N1bW1hcnksIHNldFN1bW1hcnldID0gdXNlU3RhdGUobnVsbCk7XG4gICAgY29uc3QgW2xvYWRpbmcsIHNldExvYWRpbmddID0gdXNlU3RhdGUodHJ1ZSk7XG4gICAgY29uc3QgW3BlbmRpbmcsIHNldFBlbmRpbmddID0gdXNlU3RhdGUobnVsbCk7XG4gICAgY29uc3QgW3J1bm5pbmcsIHNldFJ1bm5pbmddID0gdXNlU3RhdGUoZmFsc2UpO1xuICAgIGNvbnN0IFtlcnJvciwgc2V0RXJyb3JdID0gdXNlU3RhdGUobnVsbCk7XG4gICAgdXNlRWZmZWN0KCgpID0+IHtcbiAgICAgICAgbGV0IGFsaXZlID0gdHJ1ZTtcbiAgICAgICAgY29uc3QgYnJpZGdlID0gd2luZG93Lmhlcm1lc0Rlc2t0b3A/LnVuaW5zdGFsbDtcbiAgICAgICAgaWYgKCFicmlkZ2UpIHtcbiAgICAgICAgICAgIHNldExvYWRpbmcoZmFsc2UpO1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIHZvaWQgYnJpZGdlXG4gICAgICAgICAgICAuc3VtbWFyeSgpXG4gICAgICAgICAgICAudGhlbihyZXN1bHQgPT4ge1xuICAgICAgICAgICAgaWYgKGFsaXZlKSB7XG4gICAgICAgICAgICAgICAgc2V0U3VtbWFyeShyZXN1bHQpO1xuICAgICAgICAgICAgfVxuICAgICAgICB9KVxuICAgICAgICAgICAgLmNhdGNoKCgpID0+IHtcbiAgICAgICAgICAgIC8vIE5vbi1mYXRhbCDigJQgd2UgZGVncmFkZSB0byBvZmZlcmluZyB0aGUgR1VJLW9ubHkgb3B0aW9uLlxuICAgICAgICB9KVxuICAgICAgICAgICAgLmZpbmFsbHkoKCkgPT4ge1xuICAgICAgICAgICAgaWYgKGFsaXZlKSB7XG4gICAgICAgICAgICAgICAgc2V0TG9hZGluZyhmYWxzZSk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH0pO1xuICAgICAgICByZXR1cm4gKCkgPT4ge1xuICAgICAgICAgICAgYWxpdmUgPSBmYWxzZTtcbiAgICAgICAgfTtcbiAgICB9LCBbXSk7XG4gICAgY29uc3QgYnJpZGdlID0gd2luZG93Lmhlcm1lc0Rlc2t0b3A/LnVuaW5zdGFsbDtcbiAgICBpZiAoIWJyaWRnZSkge1xuICAgICAgICByZXR1cm4gbnVsbDtcbiAgICB9XG4gICAgLy8gR2F0ZSB0aGUgYWdlbnQtcmVtb3Zpbmcgb3B0aW9ucyBvbiB3aGV0aGVyIGFuIGFnZW50IGlzIGFjdHVhbGx5IHByZXNlbnQuXG4gICAgLy8gQSBmdXR1cmUgbGl0ZSBjbGllbnQgdGhhdCBzaGlwcyB3aXRob3V0IHRoZSBidW5kbGVkIGFnZW50IHNob3dzIEdVSS1vbmx5LlxuICAgIGNvbnN0IGFnZW50SW5zdGFsbGVkID0gc3VtbWFyeT8uYWdlbnRfaW5zdGFsbGVkID8/IGZhbHNlO1xuICAgIGNvbnN0IHZpc2libGVPcHRpb25zID0gT1BUSU9OUy5maWx0ZXIob3B0ID0+IGFnZW50SW5zdGFsbGVkIHx8ICFvcHQubmVlZHNBZ2VudCk7XG4gICAgY29uc3QgaGFuZGxlQ29uZmlybSA9IGFzeW5jICgpID0+IHtcbiAgICAgICAgaWYgKCFwZW5kaW5nKSB7XG4gICAgICAgICAgICByZXR1cm47XG4gICAgICAgIH1cbiAgICAgICAgc2V0UnVubmluZyh0cnVlKTtcbiAgICAgICAgc2V0RXJyb3IobnVsbCk7XG4gICAgICAgIHRyeSB7XG4gICAgICAgICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBicmlkZ2UucnVuKHBlbmRpbmcpO1xuICAgICAgICAgICAgaWYgKCFyZXN1bHQub2spIHtcbiAgICAgICAgICAgICAgICBzZXRFcnJvcihyZXN1bHQubWVzc2FnZSB8fCByZXN1bHQuZXJyb3IgfHwgJ1VuaW5zdGFsbCBjb3VsZCBub3Qgc3RhcnQuJyk7XG4gICAgICAgICAgICAgICAgc2V0UnVubmluZyhmYWxzZSk7XG4gICAgICAgICAgICAgICAgc2V0UGVuZGluZyhudWxsKTtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIC8vIE9uIHN1Y2Nlc3MgdGhlIGFwcCBxdWl0cyBzaG9ydGx5OyBrZWVwIHRoZSBzcGlubmVyIHVwIHVudGlsIGl0IGRvZXMuXG4gICAgICAgIH1cbiAgICAgICAgY2F0Y2ggKGVycikge1xuICAgICAgICAgICAgc2V0RXJyb3IoZXJyIGluc3RhbmNlb2YgRXJyb3IgPyBlcnIubWVzc2FnZSA6IFN0cmluZyhlcnIpKTtcbiAgICAgICAgICAgIHNldFJ1bm5pbmcoZmFsc2UpO1xuICAgICAgICAgICAgc2V0UGVuZGluZyhudWxsKTtcbiAgICAgICAgfVxuICAgIH07XG4gICAgY29uc3QgcGVuZGluZ09wdGlvbiA9IE9QVElPTlMuZmluZChvcHQgPT4gb3B0Lm1vZGUgPT09IHBlbmRpbmcpID8/IG51bGw7XG4gICAgcmV0dXJuIChfanN4cyhcImRpdlwiLCB7IGNsYXNzTmFtZTogXCJteC1hdXRvIG10LTggdy1mdWxsIG1heC13LTJ4bFwiLCBjaGlsZHJlbjogW19qc3goU2VjdGlvbkhlYWRpbmcsIHsgaWNvbjogQWxlcnRUcmlhbmdsZSwgdGl0bGU6IFwiRGFuZ2VyIHpvbmVcIiB9KSwgX2pzeChcImRpdlwiLCB7IGNsYXNzTmFtZTogXCJyb3VuZGVkLXhsIGJvcmRlciBib3JkZXItZGVzdHJ1Y3RpdmUvMzAgYmctZGVzdHJ1Y3RpdmUvNSBweC00IHB5LTNcIiwgY2hpbGRyZW46IGxvYWRpbmcgPyAoX2pzeHMoXCJkaXZcIiwgeyBjbGFzc05hbWU6IFwiZmxleCBpdGVtcy1jZW50ZXIgZ2FwLTIgcHktMiB0ZXh0LXNtIHRleHQtbXV0ZWQtZm9yZWdyb3VuZFwiLCBjaGlsZHJlbjogW19qc3goTG9hZGVyMiwgeyBjbGFzc05hbWU6IFwic2l6ZS0zLjUgYW5pbWF0ZS1zcGluXCIgfSksIFwiQ2hlY2tpbmcgd2hhdCdzIGluc3RhbGxlZFxcdTIwMjZcIl0gfSkpIDogcGVuZGluZ09wdGlvbiA/IChfanN4cyhcImRpdlwiLCB7IGNoaWxkcmVuOiBbX2pzeChcInBcIiwgeyBjbGFzc05hbWU6IFwidGV4dC1zbSBmb250LW1lZGl1bSB0ZXh0LWRlc3RydWN0aXZlXCIsIGNoaWxkcmVuOiBcIkNvbmZpcm0gdW5pbnN0YWxsXCIgfSksIF9qc3hzKFwicFwiLCB7IGNsYXNzTmFtZTogXCJtdC0xIHRleHQteHMgdGV4dC1tdXRlZC1mb3JlZ3JvdW5kXCIsIGNoaWxkcmVuOiBbXCJUaGlzIHJlbW92ZXMgXCIsIHBlbmRpbmdPcHRpb24uY29uc2VxdWVuY2UsIFwiLiBUaGlzIGNhbid0IGJlIHVuZG9uZS5cIl0gfSksIHN1bW1hcnk/LnJ1bm5pbmdfYXBwX3BhdGggJiYgKF9qc3hzKFwicFwiLCB7IGNsYXNzTmFtZTogXCJtdC0xIGZvbnQtbW9ubyB0ZXh0LVswLjY4cmVtXSB0ZXh0LW11dGVkLWZvcmVncm91bmQvNjBcIiwgY2hpbGRyZW46IFtcIkFwcDogXCIsIHN1bW1hcnkucnVubmluZ19hcHBfcGF0aF0gfSkpLCBlcnJvciAmJiBfanN4KFwicFwiLCB7IGNsYXNzTmFtZTogXCJtdC0yIHRleHQteHMgdGV4dC1kZXN0cnVjdGl2ZVwiLCBjaGlsZHJlbjogZXJyb3IgfSksIF9qc3hzKFwiZGl2XCIsIHsgY2xhc3NOYW1lOiBcIm10LTMgZmxleCBmbGV4LXdyYXAgaXRlbXMtY2VudGVyIGdhcC0zXCIsIGNoaWxkcmVuOiBbX2pzeHMoQnV0dG9uLCB7IGRpc2FibGVkOiBydW5uaW5nLCBvbkNsaWNrOiAoKSA9PiB2b2lkIGhhbmRsZUNvbmZpcm0oKSwgc2l6ZTogXCJzbVwiLCB2YXJpYW50OiBcImRlc3RydWN0aXZlXCIsIGNoaWxkcmVuOiBbcnVubmluZyAmJiBfanN4KExvYWRlcjIsIHsgY2xhc3NOYW1lOiBcInNpemUtMyBhbmltYXRlLXNwaW5cIiB9KSwgcnVubmluZyA/ICdVbmluc3RhbGxpbmfigKYnIDogJ1llcywgdW5pbnN0YWxsJ10gfSksIF9qc3goQnV0dG9uLCB7IGRpc2FibGVkOiBydW5uaW5nLCBvbkNsaWNrOiAoKSA9PiBzZXRQZW5kaW5nKG51bGwpLCBzaXplOiBcInNtXCIsIHZhcmlhbnQ6IFwidGV4dFwiLCBjaGlsZHJlbjogXCJDYW5jZWxcIiB9KV0gfSldIH0pKSA6IChfanN4cyhcImRpdlwiLCB7IGNsYXNzTmFtZTogXCJmbGV4IGZsZXgtY29sIGdhcC0yXCIsIGNoaWxkcmVuOiBbX2pzeChcInBcIiwgeyBjbGFzc05hbWU6IFwidGV4dC1zbSBmb250LW1lZGl1bVwiLCBjaGlsZHJlbjogXCJVbmluc3RhbGwgSGVybWVzXCIgfSksIF9qc3goXCJwXCIsIHsgY2xhc3NOYW1lOiBcInRleHQteHMgdGV4dC1tdXRlZC1mb3JlZ3JvdW5kXCIsIGNoaWxkcmVuOiBcIkNob29zZSBob3cgbXVjaCB0byByZW1vdmUuIFRoZSBhcHAgY2xvc2VzIHRvIGZpbmlzaCB0aGUgam9iOyByZW9wZW4gdGhlIGluc3RhbGxlciBhbnkgdGltZSB0byBjb21lIGJhY2suXCIgfSksIF9qc3goXCJkaXZcIiwgeyBjbGFzc05hbWU6IFwibXQtMSBmbGV4IGZsZXgtY29sIGdhcC0yXCIsIGNoaWxkcmVuOiB2aXNpYmxlT3B0aW9ucy5tYXAob3B0ID0+IChfanN4cyhcImJ1dHRvblwiLCB7IGNsYXNzTmFtZTogY24oJ2ZsZXggaXRlbXMtc3RhcnQgZ2FwLTMgcm91bmRlZC1sZyBib3JkZXIgYm9yZGVyLWJvcmRlci82MCBiZy1iYWNrZ3JvdW5kLzQwIHB4LTMgcHktMi41IHRleHQtbGVmdCB0cmFuc2l0aW9uJywgJ2hvdmVyOmJvcmRlci1kZXN0cnVjdGl2ZS80MCBob3ZlcjpiZy1kZXN0cnVjdGl2ZS81JyksIG9uQ2xpY2s6ICgpID0+IHtcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHNldEVycm9yKG51bGwpO1xuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgc2V0UGVuZGluZyhvcHQubW9kZSk7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIH0sIHR5cGU6IFwiYnV0dG9uXCIsIGNoaWxkcmVuOiBbX2pzeChUcmFzaDIsIHsgY2xhc3NOYW1lOiBcIm10LTAuNSBzaXplLTQgc2hyaW5rLTAgdGV4dC1tdXRlZC1mb3JlZ3JvdW5kXCIgfSksIF9qc3hzKFwic3BhblwiLCB7IGNsYXNzTmFtZTogXCJtaW4tdy0wXCIsIGNoaWxkcmVuOiBbX2pzeChcInNwYW5cIiwgeyBjbGFzc05hbWU6IFwiYmxvY2sgdGV4dC1zbSBmb250LW1lZGl1bSB0ZXh0LWZvcmVncm91bmRcIiwgY2hpbGRyZW46IG9wdC50aXRsZSB9KSwgX2pzeChcInNwYW5cIiwgeyBjbGFzc05hbWU6IFwibXQtMC41IGJsb2NrIHRleHQteHMgdGV4dC1tdXRlZC1mb3JlZ3JvdW5kXCIsIGNoaWxkcmVuOiBvcHQuZGVzY3JpcHRpb24gfSldIH0pXSB9LCBvcHQubW9kZSkpKSB9KV0gfSkpIH0pXSB9KSk7XG59XG4iXX0=

@@ -1,0 +1,123 @@
+const useEffect = __vite__cjsImport0_react["useEffect"]; const useRef = __vite__cjsImport0_react["useRef"];import __vite__cjsImport0_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { SLASH_COMMAND_RE } from "/src/lib/chat-runtime.js";
+import { triggerHaptic } from "/src/lib/haptics.js";
+import { clearComposerAttachments, clearSessionDraft } from "/src/store/composer.js";
+import { resetBrowseState } from "/src/store/composer-input-history.js";
+import { enqueueQueuedPrompt } from "/src/store/composer-queue.js";
+import { cloneAttachments } from "/src/app/chat/composer/composer-utils.js";
+import { onComposerSubmitRequest } from "/src/app/chat/composer/focus.js";
+import { composerPlainText } from "/src/app/chat/composer/rich-editor.js";
+/**
+* The composer's submit engine — the orchestration seam where the draft and
+* queue meet. `submitDraft` is the one decision tree (queue-edit save · slash-
+* now-while-busy · queue · drain · send · stop); `dispatchSubmit` is the shared
+* send-with-restore primitive (re-loads + re-stashes the draft if the gateway
+* rejects, so nothing is ever lost); `steerDraft` nudges the live turn. Reads
+* the draft + queue APIs; owns no state of its own beyond the stable
+* external-submit listener ref.
+*/
+export function useComposerSubmit({ activeQueueSessionKey, activeQueueSessionKeyRef, attachments, busy, canSteer, clearDraft, disabled, draftRef, drainNextQueued, editorRef, exitQueuedEdit, focusInput, inputDisabled, loadIntoComposer, onCancel, onSteer, onSubmit, queueCurrentDraft, queueEdit, queuedPrompts, sessionId, setComposerText, stashAt }) {
+	// Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
+	// === false) or throws, re-load + re-stash the draft so the words survive.
+	const dispatchSubmit = (text, attachments) => {
+		const submittedScope = activeQueueSessionKeyRef.current;
+		const submittedAttachments = attachments ?? [];
+		const restore = () => {
+			loadIntoComposer(text, submittedAttachments);
+			stashAt(activeQueueSessionKeyRef.current, text, submittedAttachments);
+		};
+		void Promise.resolve(attachments ? onSubmit(text, { attachments }) : onSubmit(text)).then((accepted) => void (accepted === false ? restore() : clearSessionDraft(submittedScope))).catch(restore);
+	};
+	// External "submit this prompt" requests (e.g. the review pane's agent-ship
+	// button) route through the same send path. A ref keeps the listener stable
+	// while always calling the latest dispatchSubmit closure.
+	const dispatchSubmitRef = useRef(dispatchSubmit);
+	dispatchSubmitRef.current = dispatchSubmit;
+	useEffect(() => onComposerSubmitRequest(({ target, text }) => {
+		if (target === "main" && !inputDisabled) {
+			dispatchSubmitRef.current(text);
+		}
+	}), [inputDisabled]);
+	const submitDraft = () => {
+		if (disabled) {
+			return;
+		}
+		// Source the text from the DOM editor, not React state. The AUI composer
+		// state (`draft`) and the derived `hasComposerPayload` lag the DOM by a
+		// render, so on fast typing or IME composition the final keystroke(s) may
+		// not have synced yet — reading state here drops the message (Enter looks
+		// like it does nothing; typing a trailing space only "fixes" it because the
+		// extra input event forces a state sync). draftRef is updated on every
+		// input event; refresh it from the editor once more to also cover an
+		// in-flight keystroke that hasn't fired its input event yet.
+		const editor = editorRef.current;
+		if (editor) {
+			const domText = composerPlainText(editor);
+			if (domText !== draftRef.current) {
+				draftRef.current = domText;
+				setComposerText(domText);
+			}
+		}
+		const text = draftRef.current;
+		const payloadPresent = text.trim().length > 0 || attachments.length > 0;
+		if (queueEdit) {
+			exitQueuedEdit("save");
+		} else if (busy) {
+			// Slash commands should execute immediately even while the agent is
+			// busy — they're client-side operations (/yolo, /skin, /new, /help,
+			// etc.) or self-contained gateway RPCs (/status, /compress).  onSubmit
+			// routes them to executeSlashCommand, which has its own per-command
+			// busy guard for commands that genuinely need an idle session (skill
+			// /send directives).  Queuing them would make every slash command wait
+			// for the current turn to finish, which is how the TUI never behaves.
+			if (!attachments.length && SLASH_COMMAND_RE.test(text.trim())) {
+				triggerHaptic("submit");
+				clearDraft();
+				dispatchSubmit(text);
+			} else if (payloadPresent) {
+				queueCurrentDraft();
+			} else {
+				// Stop button (the only way to reach here while busy with an empty
+				// composer — empty Enter is short-circuited in the keydown handler).
+				triggerHaptic("cancel");
+				void Promise.resolve(onCancel());
+			}
+		} else if (!payloadPresent && queuedPrompts.length > 0) {
+			void drainNextQueued();
+		} else if (payloadPresent) {
+			const submittedAttachments = cloneAttachments(attachments);
+			triggerHaptic("submit");
+			resetBrowseState(sessionId);
+			clearDraft();
+			clearComposerAttachments();
+			dispatchSubmit(text, submittedAttachments);
+		}
+		focusInput();
+	};
+	// Steer the live turn (nudge without interrupting). Clears the draft up front
+	// for snappy feedback; if the gateway rejects (no live tool window) the words
+	// are re-queued so nothing is lost — same safety net as a plain queue.
+	const steerDraft = () => {
+		if (!onSteer || !canSteer) {
+			return;
+		}
+		const text = draftRef.current.trim();
+		triggerHaptic("submit");
+		clearDraft();
+		void Promise.resolve(onSteer(text)).then((accepted) => {
+			if (!accepted && activeQueueSessionKey) {
+				enqueueQueuedPrompt(activeQueueSessionKey, {
+					text,
+					attachments: []
+				});
+			}
+		});
+	};
+	return {
+		dispatchSubmit,
+		steerDraft,
+		submitDraft
+	};
+}
+
+//# sourceMappingURL=data:application/json;base64,eyJtYXBwaW5ncyI6IkFBQUEsU0FBUyxXQUFXLGNBQWM7QUFDbEMsU0FBUyx3QkFBd0I7QUFDakMsU0FBUyxxQkFBcUI7QUFDOUIsU0FBUywwQkFBMEIseUJBQXlCO0FBQzVELFNBQVMsd0JBQXdCO0FBQ2pDLFNBQVMsMkJBQTJCO0FBQ3BDLFNBQVMsd0JBQXdCO0FBQ2pDLFNBQVMsK0JBQStCO0FBQ3hDLFNBQVMseUJBQXlCOzs7Ozs7Ozs7O0FBVWxDLE9BQU8sU0FBUyxrQkFBa0IsRUFBRSx1QkFBdUIsMEJBQTBCLGFBQWEsTUFBTSxVQUFVLFlBQVksVUFBVSxVQUFVLGlCQUFpQixXQUFXLGdCQUFnQixZQUFZLGVBQWUsa0JBQWtCLFVBQVUsU0FBUyxVQUFVLG1CQUFtQixXQUFXLGVBQWUsV0FBVyxpQkFBaUIsV0FBVzs7O0NBR3hWLE1BQU0sa0JBQWtCLE1BQU0sZ0JBQWdCO0VBQzFDLE1BQU0saUJBQWlCLHlCQUF5QjtFQUNoRCxNQUFNLHVCQUF1QixlQUFlLENBQUM7RUFDN0MsTUFBTSxnQkFBZ0I7R0FDbEIsaUJBQWlCLE1BQU0sb0JBQW9CO0dBQzNDLFFBQVEseUJBQXlCLFNBQVMsTUFBTSxvQkFBb0I7RUFDeEU7RUFDQSxLQUFLLFFBQVEsUUFBUSxjQUFjLFNBQVMsTUFBTSxFQUFFLFlBQVksQ0FBQyxJQUFJLFNBQVMsSUFBSSxDQUFDLENBQUMsQ0FDL0UsTUFBSyxhQUFZLE1BQU0sYUFBYSxRQUFRLFFBQVEsSUFBSSxrQkFBa0IsY0FBYyxFQUFFLENBQUMsQ0FDM0YsTUFBTSxPQUFPO0NBQ3RCOzs7O0NBSUEsTUFBTSxvQkFBb0IsT0FBTyxjQUFjO0NBQy9DLGtCQUFrQixVQUFVO0NBQzVCLGdCQUFnQix5QkFBeUIsRUFBRSxRQUFRLFdBQVc7RUFDMUQsSUFBSSxXQUFXLFVBQVUsQ0FBQyxlQUFlO0dBQ3JDLGtCQUFrQixRQUFRLElBQUk7RUFDbEM7Q0FDSixDQUFDLEdBQUcsQ0FBQyxhQUFhLENBQUM7Q0FDbkIsTUFBTSxvQkFBb0I7RUFDdEIsSUFBSSxVQUFVO0dBQ1Y7RUFDSjs7Ozs7Ozs7O0VBU0EsTUFBTSxTQUFTLFVBQVU7RUFDekIsSUFBSSxRQUFRO0dBQ1IsTUFBTSxVQUFVLGtCQUFrQixNQUFNO0dBQ3hDLElBQUksWUFBWSxTQUFTLFNBQVM7SUFDOUIsU0FBUyxVQUFVO0lBQ25CLGdCQUFnQixPQUFPO0dBQzNCO0VBQ0o7RUFDQSxNQUFNLE9BQU8sU0FBUztFQUN0QixNQUFNLGlCQUFpQixLQUFLLEtBQUssQ0FBQyxDQUFDLFNBQVMsS0FBSyxZQUFZLFNBQVM7RUFDdEUsSUFBSSxXQUFXO0dBQ1gsZUFBZSxNQUFNO0VBQ3pCLE9BQ0ssSUFBSSxNQUFNOzs7Ozs7OztHQVFYLElBQUksQ0FBQyxZQUFZLFVBQVUsaUJBQWlCLEtBQUssS0FBSyxLQUFLLENBQUMsR0FBRztJQUMzRCxjQUFjLFFBQVE7SUFDdEIsV0FBVztJQUNYLGVBQWUsSUFBSTtHQUN2QixPQUNLLElBQUksZ0JBQWdCO0lBQ3JCLGtCQUFrQjtHQUN0QixPQUNLOzs7SUFHRCxjQUFjLFFBQVE7SUFDdEIsS0FBSyxRQUFRLFFBQVEsU0FBUyxDQUFDO0dBQ25DO0VBQ0osT0FDSyxJQUFJLENBQUMsa0JBQWtCLGNBQWMsU0FBUyxHQUFHO0dBQ2xELEtBQUssZ0JBQWdCO0VBQ3pCLE9BQ0ssSUFBSSxnQkFBZ0I7R0FDckIsTUFBTSx1QkFBdUIsaUJBQWlCLFdBQVc7R0FDekQsY0FBYyxRQUFRO0dBQ3RCLGlCQUFpQixTQUFTO0dBQzFCLFdBQVc7R0FDWCx5QkFBeUI7R0FDekIsZUFBZSxNQUFNLG9CQUFvQjtFQUM3QztFQUNBLFdBQVc7Q0FDZjs7OztDQUlBLE1BQU0sbUJBQW1CO0VBQ3JCLElBQUksQ0FBQyxXQUFXLENBQUMsVUFBVTtHQUN2QjtFQUNKO0VBQ0EsTUFBTSxPQUFPLFNBQVMsUUFBUSxLQUFLO0VBQ25DLGNBQWMsUUFBUTtFQUN0QixXQUFXO0VBQ1gsS0FBSyxRQUFRLFFBQVEsUUFBUSxJQUFJLENBQUMsQ0FBQyxDQUFDLE1BQUssYUFBWTtHQUNqRCxJQUFJLENBQUMsWUFBWSx1QkFBdUI7SUFDcEMsb0JBQW9CLHVCQUF1QjtLQUFFO0tBQU0sYUFBYSxDQUFDO0lBQUUsQ0FBQztHQUN4RTtFQUNKLENBQUM7Q0FDTDtDQUNBLE9BQU87RUFBRTtFQUFnQjtFQUFZO0NBQVk7QUFDckQiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsidXNlLWNvbXBvc2VyLXN1Ym1pdC5qcyJdLCJ2ZXJzaW9uIjozLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyB1c2VFZmZlY3QsIHVzZVJlZiB9IGZyb20gJ3JlYWN0JztcbmltcG9ydCB7IFNMQVNIX0NPTU1BTkRfUkUgfSBmcm9tICdAL2xpYi9jaGF0LXJ1bnRpbWUnO1xuaW1wb3J0IHsgdHJpZ2dlckhhcHRpYyB9IGZyb20gJ0AvbGliL2hhcHRpY3MnO1xuaW1wb3J0IHsgY2xlYXJDb21wb3NlckF0dGFjaG1lbnRzLCBjbGVhclNlc3Npb25EcmFmdCB9IGZyb20gJ0Avc3RvcmUvY29tcG9zZXInO1xuaW1wb3J0IHsgcmVzZXRCcm93c2VTdGF0ZSB9IGZyb20gJ0Avc3RvcmUvY29tcG9zZXItaW5wdXQtaGlzdG9yeSc7XG5pbXBvcnQgeyBlbnF1ZXVlUXVldWVkUHJvbXB0IH0gZnJvbSAnQC9zdG9yZS9jb21wb3Nlci1xdWV1ZSc7XG5pbXBvcnQgeyBjbG9uZUF0dGFjaG1lbnRzIH0gZnJvbSAnLi4vY29tcG9zZXItdXRpbHMnO1xuaW1wb3J0IHsgb25Db21wb3NlclN1Ym1pdFJlcXVlc3QgfSBmcm9tICcuLi9mb2N1cyc7XG5pbXBvcnQgeyBjb21wb3NlclBsYWluVGV4dCB9IGZyb20gJy4uL3JpY2gtZWRpdG9yJztcbi8qKlxuICogVGhlIGNvbXBvc2VyJ3Mgc3VibWl0IGVuZ2luZSDigJQgdGhlIG9yY2hlc3RyYXRpb24gc2VhbSB3aGVyZSB0aGUgZHJhZnQgYW5kXG4gKiBxdWV1ZSBtZWV0LiBgc3VibWl0RHJhZnRgIGlzIHRoZSBvbmUgZGVjaXNpb24gdHJlZSAocXVldWUtZWRpdCBzYXZlIMK3IHNsYXNoLVxuICogbm93LXdoaWxlLWJ1c3kgwrcgcXVldWUgwrcgZHJhaW4gwrcgc2VuZCDCtyBzdG9wKTsgYGRpc3BhdGNoU3VibWl0YCBpcyB0aGUgc2hhcmVkXG4gKiBzZW5kLXdpdGgtcmVzdG9yZSBwcmltaXRpdmUgKHJlLWxvYWRzICsgcmUtc3Rhc2hlcyB0aGUgZHJhZnQgaWYgdGhlIGdhdGV3YXlcbiAqIHJlamVjdHMsIHNvIG5vdGhpbmcgaXMgZXZlciBsb3N0KTsgYHN0ZWVyRHJhZnRgIG51ZGdlcyB0aGUgbGl2ZSB0dXJuLiBSZWFkc1xuICogdGhlIGRyYWZ0ICsgcXVldWUgQVBJczsgb3ducyBubyBzdGF0ZSBvZiBpdHMgb3duIGJleW9uZCB0aGUgc3RhYmxlXG4gKiBleHRlcm5hbC1zdWJtaXQgbGlzdGVuZXIgcmVmLlxuICovXG5leHBvcnQgZnVuY3Rpb24gdXNlQ29tcG9zZXJTdWJtaXQoeyBhY3RpdmVRdWV1ZVNlc3Npb25LZXksIGFjdGl2ZVF1ZXVlU2Vzc2lvbktleVJlZiwgYXR0YWNobWVudHMsIGJ1c3ksIGNhblN0ZWVyLCBjbGVhckRyYWZ0LCBkaXNhYmxlZCwgZHJhZnRSZWYsIGRyYWluTmV4dFF1ZXVlZCwgZWRpdG9yUmVmLCBleGl0UXVldWVkRWRpdCwgZm9jdXNJbnB1dCwgaW5wdXREaXNhYmxlZCwgbG9hZEludG9Db21wb3Nlciwgb25DYW5jZWwsIG9uU3RlZXIsIG9uU3VibWl0LCBxdWV1ZUN1cnJlbnREcmFmdCwgcXVldWVFZGl0LCBxdWV1ZWRQcm9tcHRzLCBzZXNzaW9uSWQsIHNldENvbXBvc2VyVGV4dCwgc3Rhc2hBdCB9KSB7XG4gICAgLy8gU2hhcmVkIHNlbmQgcHJpbWl0aXZlOiBmaXJlIG9uU3VibWl0LCBhbmQgaWYgdGhlIGdhdGV3YXkgcmVqZWN0cyAoYWNjZXB0ZWRcbiAgICAvLyA9PT0gZmFsc2UpIG9yIHRocm93cywgcmUtbG9hZCArIHJlLXN0YXNoIHRoZSBkcmFmdCBzbyB0aGUgd29yZHMgc3Vydml2ZS5cbiAgICBjb25zdCBkaXNwYXRjaFN1Ym1pdCA9ICh0ZXh0LCBhdHRhY2htZW50cykgPT4ge1xuICAgICAgICBjb25zdCBzdWJtaXR0ZWRTY29wZSA9IGFjdGl2ZVF1ZXVlU2Vzc2lvbktleVJlZi5jdXJyZW50O1xuICAgICAgICBjb25zdCBzdWJtaXR0ZWRBdHRhY2htZW50cyA9IGF0dGFjaG1lbnRzID8/IFtdO1xuICAgICAgICBjb25zdCByZXN0b3JlID0gKCkgPT4ge1xuICAgICAgICAgICAgbG9hZEludG9Db21wb3Nlcih0ZXh0LCBzdWJtaXR0ZWRBdHRhY2htZW50cyk7XG4gICAgICAgICAgICBzdGFzaEF0KGFjdGl2ZVF1ZXVlU2Vzc2lvbktleVJlZi5jdXJyZW50LCB0ZXh0LCBzdWJtaXR0ZWRBdHRhY2htZW50cyk7XG4gICAgICAgIH07XG4gICAgICAgIHZvaWQgUHJvbWlzZS5yZXNvbHZlKGF0dGFjaG1lbnRzID8gb25TdWJtaXQodGV4dCwgeyBhdHRhY2htZW50cyB9KSA6IG9uU3VibWl0KHRleHQpKVxuICAgICAgICAgICAgLnRoZW4oYWNjZXB0ZWQgPT4gdm9pZCAoYWNjZXB0ZWQgPT09IGZhbHNlID8gcmVzdG9yZSgpIDogY2xlYXJTZXNzaW9uRHJhZnQoc3VibWl0dGVkU2NvcGUpKSlcbiAgICAgICAgICAgIC5jYXRjaChyZXN0b3JlKTtcbiAgICB9O1xuICAgIC8vIEV4dGVybmFsIFwic3VibWl0IHRoaXMgcHJvbXB0XCIgcmVxdWVzdHMgKGUuZy4gdGhlIHJldmlldyBwYW5lJ3MgYWdlbnQtc2hpcFxuICAgIC8vIGJ1dHRvbikgcm91dGUgdGhyb3VnaCB0aGUgc2FtZSBzZW5kIHBhdGguIEEgcmVmIGtlZXBzIHRoZSBsaXN0ZW5lciBzdGFibGVcbiAgICAvLyB3aGlsZSBhbHdheXMgY2FsbGluZyB0aGUgbGF0ZXN0IGRpc3BhdGNoU3VibWl0IGNsb3N1cmUuXG4gICAgY29uc3QgZGlzcGF0Y2hTdWJtaXRSZWYgPSB1c2VSZWYoZGlzcGF0Y2hTdWJtaXQpO1xuICAgIGRpc3BhdGNoU3VibWl0UmVmLmN1cnJlbnQgPSBkaXNwYXRjaFN1Ym1pdDtcbiAgICB1c2VFZmZlY3QoKCkgPT4gb25Db21wb3NlclN1Ym1pdFJlcXVlc3QoKHsgdGFyZ2V0LCB0ZXh0IH0pID0+IHtcbiAgICAgICAgaWYgKHRhcmdldCA9PT0gJ21haW4nICYmICFpbnB1dERpc2FibGVkKSB7XG4gICAgICAgICAgICBkaXNwYXRjaFN1Ym1pdFJlZi5jdXJyZW50KHRleHQpO1xuICAgICAgICB9XG4gICAgfSksIFtpbnB1dERpc2FibGVkXSk7XG4gICAgY29uc3Qgc3VibWl0RHJhZnQgPSAoKSA9PiB7XG4gICAgICAgIGlmIChkaXNhYmxlZCkge1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIC8vIFNvdXJjZSB0aGUgdGV4dCBmcm9tIHRoZSBET00gZWRpdG9yLCBub3QgUmVhY3Qgc3RhdGUuIFRoZSBBVUkgY29tcG9zZXJcbiAgICAgICAgLy8gc3RhdGUgKGBkcmFmdGApIGFuZCB0aGUgZGVyaXZlZCBgaGFzQ29tcG9zZXJQYXlsb2FkYCBsYWcgdGhlIERPTSBieSBhXG4gICAgICAgIC8vIHJlbmRlciwgc28gb24gZmFzdCB0eXBpbmcgb3IgSU1FIGNvbXBvc2l0aW9uIHRoZSBmaW5hbCBrZXlzdHJva2UocykgbWF5XG4gICAgICAgIC8vIG5vdCBoYXZlIHN5bmNlZCB5ZXQg4oCUIHJlYWRpbmcgc3RhdGUgaGVyZSBkcm9wcyB0aGUgbWVzc2FnZSAoRW50ZXIgbG9va3NcbiAgICAgICAgLy8gbGlrZSBpdCBkb2VzIG5vdGhpbmc7IHR5cGluZyBhIHRyYWlsaW5nIHNwYWNlIG9ubHkgXCJmaXhlc1wiIGl0IGJlY2F1c2UgdGhlXG4gICAgICAgIC8vIGV4dHJhIGlucHV0IGV2ZW50IGZvcmNlcyBhIHN0YXRlIHN5bmMpLiBkcmFmdFJlZiBpcyB1cGRhdGVkIG9uIGV2ZXJ5XG4gICAgICAgIC8vIGlucHV0IGV2ZW50OyByZWZyZXNoIGl0IGZyb20gdGhlIGVkaXRvciBvbmNlIG1vcmUgdG8gYWxzbyBjb3ZlciBhblxuICAgICAgICAvLyBpbi1mbGlnaHQga2V5c3Ryb2tlIHRoYXQgaGFzbid0IGZpcmVkIGl0cyBpbnB1dCBldmVudCB5ZXQuXG4gICAgICAgIGNvbnN0IGVkaXRvciA9IGVkaXRvclJlZi5jdXJyZW50O1xuICAgICAgICBpZiAoZWRpdG9yKSB7XG4gICAgICAgICAgICBjb25zdCBkb21UZXh0ID0gY29tcG9zZXJQbGFpblRleHQoZWRpdG9yKTtcbiAgICAgICAgICAgIGlmIChkb21UZXh0ICE9PSBkcmFmdFJlZi5jdXJyZW50KSB7XG4gICAgICAgICAgICAgICAgZHJhZnRSZWYuY3VycmVudCA9IGRvbVRleHQ7XG4gICAgICAgICAgICAgICAgc2V0Q29tcG9zZXJUZXh0KGRvbVRleHQpO1xuICAgICAgICAgICAgfVxuICAgICAgICB9XG4gICAgICAgIGNvbnN0IHRleHQgPSBkcmFmdFJlZi5jdXJyZW50O1xuICAgICAgICBjb25zdCBwYXlsb2FkUHJlc2VudCA9IHRleHQudHJpbSgpLmxlbmd0aCA+IDAgfHwgYXR0YWNobWVudHMubGVuZ3RoID4gMDtcbiAgICAgICAgaWYgKHF1ZXVlRWRpdCkge1xuICAgICAgICAgICAgZXhpdFF1ZXVlZEVkaXQoJ3NhdmUnKTtcbiAgICAgICAgfVxuICAgICAgICBlbHNlIGlmIChidXN5KSB7XG4gICAgICAgICAgICAvLyBTbGFzaCBjb21tYW5kcyBzaG91bGQgZXhlY3V0ZSBpbW1lZGlhdGVseSBldmVuIHdoaWxlIHRoZSBhZ2VudCBpc1xuICAgICAgICAgICAgLy8gYnVzeSDigJQgdGhleSdyZSBjbGllbnQtc2lkZSBvcGVyYXRpb25zICgveW9sbywgL3NraW4sIC9uZXcsIC9oZWxwLFxuICAgICAgICAgICAgLy8gZXRjLikgb3Igc2VsZi1jb250YWluZWQgZ2F0ZXdheSBSUENzICgvc3RhdHVzLCAvY29tcHJlc3MpLiAgb25TdWJtaXRcbiAgICAgICAgICAgIC8vIHJvdXRlcyB0aGVtIHRvIGV4ZWN1dGVTbGFzaENvbW1hbmQsIHdoaWNoIGhhcyBpdHMgb3duIHBlci1jb21tYW5kXG4gICAgICAgICAgICAvLyBidXN5IGd1YXJkIGZvciBjb21tYW5kcyB0aGF0IGdlbnVpbmVseSBuZWVkIGFuIGlkbGUgc2Vzc2lvbiAoc2tpbGxcbiAgICAgICAgICAgIC8vIC9zZW5kIGRpcmVjdGl2ZXMpLiAgUXVldWluZyB0aGVtIHdvdWxkIG1ha2UgZXZlcnkgc2xhc2ggY29tbWFuZCB3YWl0XG4gICAgICAgICAgICAvLyBmb3IgdGhlIGN1cnJlbnQgdHVybiB0byBmaW5pc2gsIHdoaWNoIGlzIGhvdyB0aGUgVFVJIG5ldmVyIGJlaGF2ZXMuXG4gICAgICAgICAgICBpZiAoIWF0dGFjaG1lbnRzLmxlbmd0aCAmJiBTTEFTSF9DT01NQU5EX1JFLnRlc3QodGV4dC50cmltKCkpKSB7XG4gICAgICAgICAgICAgICAgdHJpZ2dlckhhcHRpYygnc3VibWl0Jyk7XG4gICAgICAgICAgICAgICAgY2xlYXJEcmFmdCgpO1xuICAgICAgICAgICAgICAgIGRpc3BhdGNoU3VibWl0KHRleHQpO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgZWxzZSBpZiAocGF5bG9hZFByZXNlbnQpIHtcbiAgICAgICAgICAgICAgICBxdWV1ZUN1cnJlbnREcmFmdCgpO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgZWxzZSB7XG4gICAgICAgICAgICAgICAgLy8gU3RvcCBidXR0b24gKHRoZSBvbmx5IHdheSB0byByZWFjaCBoZXJlIHdoaWxlIGJ1c3kgd2l0aCBhbiBlbXB0eVxuICAgICAgICAgICAgICAgIC8vIGNvbXBvc2VyIOKAlCBlbXB0eSBFbnRlciBpcyBzaG9ydC1jaXJjdWl0ZWQgaW4gdGhlIGtleWRvd24gaGFuZGxlcikuXG4gICAgICAgICAgICAgICAgdHJpZ2dlckhhcHRpYygnY2FuY2VsJyk7XG4gICAgICAgICAgICAgICAgdm9pZCBQcm9taXNlLnJlc29sdmUob25DYW5jZWwoKSk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH1cbiAgICAgICAgZWxzZSBpZiAoIXBheWxvYWRQcmVzZW50ICYmIHF1ZXVlZFByb21wdHMubGVuZ3RoID4gMCkge1xuICAgICAgICAgICAgdm9pZCBkcmFpbk5leHRRdWV1ZWQoKTtcbiAgICAgICAgfVxuICAgICAgICBlbHNlIGlmIChwYXlsb2FkUHJlc2VudCkge1xuICAgICAgICAgICAgY29uc3Qgc3VibWl0dGVkQXR0YWNobWVudHMgPSBjbG9uZUF0dGFjaG1lbnRzKGF0dGFjaG1lbnRzKTtcbiAgICAgICAgICAgIHRyaWdnZXJIYXB0aWMoJ3N1Ym1pdCcpO1xuICAgICAgICAgICAgcmVzZXRCcm93c2VTdGF0ZShzZXNzaW9uSWQpO1xuICAgICAgICAgICAgY2xlYXJEcmFmdCgpO1xuICAgICAgICAgICAgY2xlYXJDb21wb3NlckF0dGFjaG1lbnRzKCk7XG4gICAgICAgICAgICBkaXNwYXRjaFN1Ym1pdCh0ZXh0LCBzdWJtaXR0ZWRBdHRhY2htZW50cyk7XG4gICAgICAgIH1cbiAgICAgICAgZm9jdXNJbnB1dCgpO1xuICAgIH07XG4gICAgLy8gU3RlZXIgdGhlIGxpdmUgdHVybiAobnVkZ2Ugd2l0aG91dCBpbnRlcnJ1cHRpbmcpLiBDbGVhcnMgdGhlIGRyYWZ0IHVwIGZyb250XG4gICAgLy8gZm9yIHNuYXBweSBmZWVkYmFjazsgaWYgdGhlIGdhdGV3YXkgcmVqZWN0cyAobm8gbGl2ZSB0b29sIHdpbmRvdykgdGhlIHdvcmRzXG4gICAgLy8gYXJlIHJlLXF1ZXVlZCBzbyBub3RoaW5nIGlzIGxvc3Qg4oCUIHNhbWUgc2FmZXR5IG5ldCBhcyBhIHBsYWluIHF1ZXVlLlxuICAgIGNvbnN0IHN0ZWVyRHJhZnQgPSAoKSA9PiB7XG4gICAgICAgIGlmICghb25TdGVlciB8fCAhY2FuU3RlZXIpIHtcbiAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCB0ZXh0ID0gZHJhZnRSZWYuY3VycmVudC50cmltKCk7XG4gICAgICAgIHRyaWdnZXJIYXB0aWMoJ3N1Ym1pdCcpO1xuICAgICAgICBjbGVhckRyYWZ0KCk7XG4gICAgICAgIHZvaWQgUHJvbWlzZS5yZXNvbHZlKG9uU3RlZXIodGV4dCkpLnRoZW4oYWNjZXB0ZWQgPT4ge1xuICAgICAgICAgICAgaWYgKCFhY2NlcHRlZCAmJiBhY3RpdmVRdWV1ZVNlc3Npb25LZXkpIHtcbiAgICAgICAgICAgICAgICBlbnF1ZXVlUXVldWVkUHJvbXB0KGFjdGl2ZVF1ZXVlU2Vzc2lvbktleSwgeyB0ZXh0LCBhdHRhY2htZW50czogW10gfSk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH0pO1xuICAgIH07XG4gICAgcmV0dXJuIHsgZGlzcGF0Y2hTdWJtaXQsIHN0ZWVyRHJhZnQsIHN1Ym1pdERyYWZ0IH07XG59XG4iXX0=

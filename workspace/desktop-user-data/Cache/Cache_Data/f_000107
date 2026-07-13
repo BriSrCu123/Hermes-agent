@@ -1,0 +1,202 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/app/shell/app-shell.js");const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"]; const _jsxs = __vite__cjsImport0_react_jsxRuntime["jsxs"];const useSyncExternalStore = __vite__cjsImport2_react["useSyncExternalStore"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import { useStore } from "/node_modules/.vite/deps/@nanostores_react.js?v=d550b4c6";
+import __vite__cjsImport2_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { NotificationStack } from "/src/components/notifications.js";
+import { PaneShell } from "/src/components/pane-shell/index.js";
+import { FloatingPet } from "/src/components/pet/floating-pet.js";
+import { SidebarProvider } from "/src/components/ui/sidebar.js";
+import { useMediaQuery } from "/src/hooks/use-media-query.js";
+import { $fileBrowserOpen, $panesFlipped, $sidebarOpen, FILE_BROWSER_DEFAULT_WIDTH, FILE_BROWSER_PANE_ID, setSidebarOpen } from "/src/store/layout.js";
+import { $paneWidthOverride } from "/src/store/panes.js";
+import { $connection } from "/src/store/session.js";
+import { isSecondaryWindow } from "/src/store/windows.js";
+import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from "/src/app/layout-constants.js";
+import { useWindowControlsOverlayWidth } from "/src/app/shell/hooks/use-window-controls-overlay-width.js";
+import { KeybindPanel } from "/src/app/shell/keybind-panel.js";
+import { StatusbarControls } from "/src/app/shell/statusbar-controls.js";
+import { TITLEBAR_HEIGHT, titlebarControlsPosition } from "/src/app/shell/titlebar.js";
+import { TitlebarControls } from "/src/app/shell/titlebar-controls.js";
+var _s = $RefreshSig$();
+// Renderer-side fallback so layout snaps even when the main-process fullscreen event
+// hasn't landed yet (e.g. dev reloads, before the IPC bridge is wired).
+function subscribeWindowSize(cb) {
+	window.addEventListener("resize", cb);
+	window.addEventListener("fullscreenchange", cb);
+	return () => {
+		window.removeEventListener("resize", cb);
+		window.removeEventListener("fullscreenchange", cb);
+	};
+}
+const viewportIsFullscreen = () => window.innerWidth >= window.screen.width && window.innerHeight >= window.screen.height;
+export function AppShell({ children, leftStatusbarItems, leftTitlebarTools, mainOverlays, onOpenSettings, overlays, previewPaneOpen = false, statusbarItems, terminalPaneOpen = false, titlebarTools }) {
+	_s();
+	const sidebarOpen = useStore($sidebarOpen);
+	const fileBrowserOpen = useStore($fileBrowserOpen);
+	const panesFlipped = useStore($panesFlipped);
+	const narrowViewport = useMediaQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY);
+	const fileBrowserWidthOverride = useStore($paneWidthOverride(FILE_BROWSER_PANE_ID));
+	const connection = useStore($connection);
+	const viewportFullscreen = useSyncExternalStore(subscribeWindowSize, viewportIsFullscreen, () => false);
+	const isFullscreen = Boolean(connection?.isFullscreen) || viewportFullscreen;
+	// Every secondary window (new-session scratch, subagent watch, cmd-click
+	// pop-out) is a compact side panel — none of them carry the full titlebar
+	// tool cluster. Gate on isSecondaryWindow, never the narrower new-session flag.
+	const hideTitlebarControls = isSecondaryWindow();
+	const titlebarControls = titlebarControlsPosition(connection?.windowButtonPosition, isFullscreen);
+	// Width Windows/WSLg reserve for the native min/max/close overlay (zero on
+	// macOS, where window controls sit on the left and are reported via
+	// windowButtonPosition instead). The right tool cluster has to clear them.
+	// Prefer the EXACT width measured from the live Window Controls Overlay
+	// (precise + self-correcting across DPI/host themes); fall back to the static
+	// reservation the main process sends when the WCO API isn't available.
+	const measuredOverlayWidth = useWindowControlsOverlayWidth();
+	const staticOverlayWidth = connection?.nativeOverlayWidth ?? 0;
+	const nativeOverlayWidth = measuredOverlayWidth ?? staticOverlayWidth;
+	const titlebarToolsRight = nativeOverlayWidth > 0 ? `${nativeOverlayWidth}px` : "0.75rem";
+	// When the native window controls overlay our titlebar band — Windows and
+	// WSLg both paint Electron's Window Controls Overlay and report
+	// nativeOverlayWidth > 0 — the right rail's editor-style tab strip (which
+	// normally lives IN that band) would render at y=0 under the fixed titlebar
+	// tool cluster and collide with it. Drop the right rail one titlebar-height so
+	// it opens BELOW the band. macOS / plain Linux paint no overlay → 0 inset,
+	// layout byte-for-byte unchanged. Consumed as --right-rail-top-inset.
+	const rightRailTopInset = nativeOverlayWidth > 0 ? "var(--titlebar-height)" : "0px";
+	// The inset clears the top-left titlebar buttons when nothing covers the
+	// window's left edge. Default layout: the sessions sidebar sits there.
+	// Flipped layout: the file browser does instead. Both force-collapse to a
+	// hover-reveal overlay (0px track) below the collapse breakpoint, so the edge
+	// is uncovered there regardless of their stored open state. A standalone
+	// session window renders no sidebar at all, so its edge is always uncovered.
+	const collapsibleLeftPaneOpen = panesFlipped ? fileBrowserOpen : sidebarOpen;
+	// The terminal + preview rails never force-collapse, so when they're the
+	// leftmost open pane (flipped layout) they cover the edge even when narrow.
+	const persistentLeftPaneOpen = panesFlipped && (terminalPaneOpen || previewPaneOpen);
+	const leftEdgePaneOpen = !isSecondaryWindow() && (!narrowViewport && collapsibleLeftPaneOpen || persistentLeftPaneOpen);
+	const titlebarContentInset = leftEdgePaneOpen ? 0 : titlebarControls.left + TITLEBAR_HEIGHT + Math.round(TITLEBAR_HEIGHT / 2);
+	// The static system cluster (haptics, profiles, settings, right-sidebar) is
+	// hardcoded in TitlebarControls. Pane-supplied tools (preview's group) render
+	// in a separate cluster anchored further left.
+	//
+	// Width math has to include the `gap-x-1` (0.25rem) between buttons:
+	// N buttons + (N - 1) inner gaps, plus one extra 0.25rem of breathing room
+	// between the pane-tool cluster and the system cluster so they don't sit
+	// flush against each other. Modeled as N gaps (N - 1 inner + 1 trailing)
+	// to keep the formula generic for any pane-tool count.
+	const SYSTEM_TOOL_COUNT = 4;
+	const paneToolCount = titlebarTools?.filter((tool) => !tool.hidden).length ?? 0;
+	const systemToolsWidth = `calc(${SYSTEM_TOOL_COUNT} * (var(--titlebar-control-size) + 0.25rem))`;
+	const fileBrowserWidth = fileBrowserWidthOverride !== undefined ? `${fileBrowserWidthOverride}px` : FILE_BROWSER_DEFAULT_WIDTH;
+	// Where the pane-tool cluster's right edge sits, measured from the inner
+	// titlebar padding (--titlebar-tools-right). Two anchors:
+	//   - file-browser closed → flush against static cluster's left edge
+	//   - file-browser open   → flush against the file-browser pane's left edge
+	//                           (= preview pane's right edge)
+	const previewToolbarGap = fileBrowserOpen ? fileBrowserWidth : systemToolsWidth;
+	// Used by the drag region to know where the rightmost interactive element
+	// ends. When pane tools are present, that's `gap + paneCount * controlSize
+	// + paneCount * 0.25rem` (the leftmost button is at `tools-right + gap +
+	// paneCount * (size + gap-x-1)`). Otherwise the static cluster's footprint
+	// is enough.
+	const titlebarToolsWidth = paneToolCount > 0 ? `calc(${previewToolbarGap} + ${paneToolCount} * (var(--titlebar-control-size) + 0.25rem))` : systemToolsWidth;
+	return _jsxs(SidebarProvider, {
+		className: "h-screen min-h-0 flex-col bg-background",
+		onOpenChange: setSidebarOpen,
+		open: sidebarOpen,
+		style: {
+			// Alias for shadcn <Sidebar> descendants. Resolves to the chat-sidebar
+			// pane track via PaneShell's emitted --pane-chat-sidebar-width.
+			"--sidebar-width": "var(--pane-chat-sidebar-width)",
+			"--titlebar-height": `${TITLEBAR_HEIGHT}px`,
+			"--titlebar-content-inset": `${titlebarContentInset}px`,
+			"--titlebar-controls-left": `${titlebarControls.left}px`,
+			"--titlebar-controls-top": `${titlebarControls.top}px`,
+			"--titlebar-tools-right": titlebarToolsRight,
+			"--titlebar-tools-width": titlebarToolsWidth,
+			// Drops the right rail below the titlebar band when the OS/host paints
+			// window controls over it (Windows/WSLg); 0px elsewhere.
+			"--right-rail-top-inset": rightRailTopInset,
+			// Anchor for the pane-tool cluster's right edge in TitlebarControls.
+			// Sourced from the layout store rather than the PaneShell-emitted
+			// --pane-*-width vars because the titlebar is a sibling of PaneShell
+			// and CSS variables resolve at the consumer's scope.
+			"--shell-preview-toolbar-gap": previewToolbarGap
+		},
+		children: [
+			!hideTitlebarControls && _jsx(TitlebarControls, {
+				leftTools: leftTitlebarTools,
+				onOpenSettings,
+				tools: titlebarTools
+			}),
+			nativeOverlayWidth > 0 && _jsx("div", {
+				"aria-hidden": true,
+				className: "pointer-events-none fixed right-0 top-0 z-[4] h-(--titlebar-height) w-(--titlebar-tools-right) border-b border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background)"
+			}),
+			_jsxs("main", {
+				className: "relative z-3 flex min-h-0 w-full flex-1 flex-col overflow-hidden transition-none",
+				children: [
+					_jsxs(PaneShell, {
+						className: "min-h-0 flex-1",
+						children: [
+							_jsx("div", {
+								"aria-hidden": "true",
+								className: "pointer-events-none absolute left-0 top-0 z-1 h-(--titlebar-height) w-(--titlebar-controls-left) [-webkit-app-region:drag]"
+							}),
+							_jsx("div", {
+								"aria-hidden": "true",
+								className: "pointer-events-none absolute top-0 z-1 h-(--titlebar-height) left-[calc(var(--titlebar-controls-left)+(var(--titlebar-control-size)*2)+0.75rem)] right-[calc(var(--titlebar-tools-right)+var(--titlebar-tools-width)+0.75rem)] [-webkit-app-region:drag]"
+							}),
+							children
+						]
+					}),
+					mainOverlays,
+					!isSecondaryWindow() && _jsx(StatusbarControls, {
+						items: statusbarItems,
+						leftItems: leftStatusbarItems
+					})
+				]
+			}),
+			overlays,
+			_jsx(KeybindPanel, {}),
+			_jsx(NotificationStack, {}),
+			_jsx(FloatingPet, {})
+		]
+	});
+}
+_s(AppShell, "Tfxxp1rYRNXemTy66agdlHoGkvw=", false, function() {
+	return [
+		useStore,
+		useStore,
+		useStore,
+		useMediaQuery,
+		useStore,
+		useStore,
+		useWindowControlsOverlayWidth
+	];
+});
+_c = AppShell;
+var _c;
+$RefreshReg$(_c, "AppShell");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/app/shell/app-shell.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/app-shell.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/app-shell.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/app-shell.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,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LEdBQUcscUJBQXFCO0dBQ3BELDRCQUE0QixHQUFHLGlCQUFpQixLQUFLO0dBQ3JELDJCQUEyQixHQUFHLGlCQUFpQixJQUFJO0dBQ25ELDBCQUEwQjtHQUMxQiwwQkFBMEI7OztHQUcxQiwwQkFBMEI7Ozs7O0dBSzFCLCtCQUErQjtFQUNuQztFQUFHLFVBQVU7R0FBQyxDQUFDLHdCQUF5QixLQUFLLGtCQUFrQjtJQUFFLFdBQVc7SUFBbUM7SUFBZ0IsT0FBTztHQUFjLENBQUM7R0FBSSxxQkFBcUIsS0FBTSxLQUFLLE9BQU87SUFBRSxlQUFlO0lBQU0sV0FBVztHQUEwSyxDQUFDO0dBQUksTUFBTSxRQUFRO0lBQUUsV0FBVztJQUFvRixVQUFVO0tBQUMsTUFBTSxXQUFXO01BQUUsV0FBVztNQUFrQixVQUFVO09BQUMsS0FBSyxPQUFPO1FBQUUsZUFBZTtRQUFRLFdBQVc7T0FBNkgsQ0FBQztPQUFHLEtBQUssT0FBTztRQUFFLGVBQWU7UUFBUSxXQUFXO09BQTJQLENBQUM7T0FBRztNQUFRO0tBQUUsQ0FBQztLQUFHO0tBQWMsQ0FBQyxrQkFBa0IsS0FBSyxLQUFLLG1CQUFtQjtNQUFFLE9BQU87TUFBZ0IsV0FBVztLQUFtQixDQUFDO0lBQUM7R0FBRSxDQUFDO0dBQUc7R0FBVSxLQUFLLGNBQWMsQ0FBQyxDQUFDO0dBQUcsS0FBSyxtQkFBbUIsQ0FBQyxDQUFDO0dBQUcsS0FBSyxhQUFhLENBQUMsQ0FBQztFQUFDO0NBQUUsQ0FBQztBQUNoeEMiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiYXBwLXNoZWxsLmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGpzeCBhcyBfanN4LCBqc3hzIGFzIF9qc3hzIH0gZnJvbSBcInJlYWN0L2pzeC1ydW50aW1lXCI7XG5pbXBvcnQgeyB1c2VTdG9yZSB9IGZyb20gJ0BuYW5vc3RvcmVzL3JlYWN0JztcbmltcG9ydCB7IHVzZVN5bmNFeHRlcm5hbFN0b3JlIH0gZnJvbSAncmVhY3QnO1xuaW1wb3J0IHsgTm90aWZpY2F0aW9uU3RhY2sgfSBmcm9tICdAL2NvbXBvbmVudHMvbm90aWZpY2F0aW9ucyc7XG5pbXBvcnQgeyBQYW5lU2hlbGwgfSBmcm9tICdAL2NvbXBvbmVudHMvcGFuZS1zaGVsbCc7XG5pbXBvcnQgeyBGbG9hdGluZ1BldCB9IGZyb20gJ0AvY29tcG9uZW50cy9wZXQvZmxvYXRpbmctcGV0JztcbmltcG9ydCB7IFNpZGViYXJQcm92aWRlciB9IGZyb20gJ0AvY29tcG9uZW50cy91aS9zaWRlYmFyJztcbmltcG9ydCB7IHVzZU1lZGlhUXVlcnkgfSBmcm9tICdAL2hvb2tzL3VzZS1tZWRpYS1xdWVyeSc7XG5pbXBvcnQgeyAkZmlsZUJyb3dzZXJPcGVuLCAkcGFuZXNGbGlwcGVkLCAkc2lkZWJhck9wZW4sIEZJTEVfQlJPV1NFUl9ERUZBVUxUX1dJRFRILCBGSUxFX0JST1dTRVJfUEFORV9JRCwgc2V0U2lkZWJhck9wZW4gfSBmcm9tICdAL3N0b3JlL2xheW91dCc7XG5pbXBvcnQgeyAkcGFuZVdpZHRoT3ZlcnJpZGUgfSBmcm9tICdAL3N0b3JlL3BhbmVzJztcbmltcG9ydCB7ICRjb25uZWN0aW9uIH0gZnJvbSAnQC9zdG9yZS9zZXNzaW9uJztcbmltcG9ydCB7IGlzU2Vjb25kYXJ5V2luZG93IH0gZnJvbSAnQC9zdG9yZS93aW5kb3dzJztcbmltcG9ydCB7IFNJREVCQVJfQ09MTEFQU0VfTUVESUFfUVVFUlkgfSBmcm9tICcuLi9sYXlvdXQtY29uc3RhbnRzJztcbmltcG9ydCB7IHVzZVdpbmRvd0NvbnRyb2xzT3ZlcmxheVdpZHRoIH0gZnJvbSAnLi9ob29rcy91c2Utd2luZG93LWNvbnRyb2xzLW92ZXJsYXktd2lkdGgnO1xuaW1wb3J0IHsgS2V5YmluZFBhbmVsIH0gZnJvbSAnLi9rZXliaW5kLXBhbmVsJztcbmltcG9ydCB7IFN0YXR1c2JhckNvbnRyb2xzIH0gZnJvbSAnLi9zdGF0dXNiYXItY29udHJvbHMnO1xuaW1wb3J0IHsgVElUTEVCQVJfSEVJR0hULCB0aXRsZWJhckNvbnRyb2xzUG9zaXRpb24gfSBmcm9tICcuL3RpdGxlYmFyJztcbmltcG9ydCB7IFRpdGxlYmFyQ29udHJvbHMgfSBmcm9tICcuL3RpdGxlYmFyLWNvbnRyb2xzJztcbi8vIFJlbmRlcmVyLXNpZGUgZmFsbGJhY2sgc28gbGF5b3V0IHNuYXBzIGV2ZW4gd2hlbiB0aGUgbWFpbi1wcm9jZXNzIGZ1bGxzY3JlZW4gZXZlbnRcbi8vIGhhc24ndCBsYW5kZWQgeWV0IChlLmcuIGRldiByZWxvYWRzLCBiZWZvcmUgdGhlIElQQyBicmlkZ2UgaXMgd2lyZWQpLlxuZnVuY3Rpb24gc3Vic2NyaWJlV2luZG93U2l6ZShjYikge1xuICAgIHdpbmRvdy5hZGRFdmVudExpc3RlbmVyKCdyZXNpemUnLCBjYik7XG4gICAgd2luZG93LmFkZEV2ZW50TGlzdGVuZXIoJ2Z1bGxzY3JlZW5jaGFuZ2UnLCBjYik7XG4gICAgcmV0dXJuICgpID0+IHtcbiAgICAgICAgd2luZG93LnJlbW92ZUV2ZW50TGlzdGVuZXIoJ3Jlc2l6ZScsIGNiKTtcbiAgICAgICAgd2luZG93LnJlbW92ZUV2ZW50TGlzdGVuZXIoJ2Z1bGxzY3JlZW5jaGFuZ2UnLCBjYik7XG4gICAgfTtcbn1cbmNvbnN0IHZpZXdwb3J0SXNGdWxsc2NyZWVuID0gKCkgPT4gd2luZG93LmlubmVyV2lkdGggPj0gd2luZG93LnNjcmVlbi53aWR0aCAmJiB3aW5kb3cuaW5uZXJIZWlnaHQgPj0gd2luZG93LnNjcmVlbi5oZWlnaHQ7XG5leHBvcnQgZnVuY3Rpb24gQXBwU2hlbGwoeyBjaGlsZHJlbiwgbGVmdFN0YXR1c2Jhckl0ZW1zLCBsZWZ0VGl0bGViYXJUb29scywgbWFpbk92ZXJsYXlzLCBvbk9wZW5TZXR0aW5ncywgb3ZlcmxheXMsIHByZXZpZXdQYW5lT3BlbiA9IGZhbHNlLCBzdGF0dXNiYXJJdGVtcywgdGVybWluYWxQYW5lT3BlbiA9IGZhbHNlLCB0aXRsZWJhclRvb2xzIH0pIHtcbiAgICBjb25zdCBzaWRlYmFyT3BlbiA9IHVzZVN0b3JlKCRzaWRlYmFyT3Blbik7XG4gICAgY29uc3QgZmlsZUJyb3dzZXJPcGVuID0gdXNlU3RvcmUoJGZpbGVCcm93c2VyT3Blbik7XG4gICAgY29uc3QgcGFuZXNGbGlwcGVkID0gdXNlU3RvcmUoJHBhbmVzRmxpcHBlZCk7XG4gICAgY29uc3QgbmFycm93Vmlld3BvcnQgPSB1c2VNZWRpYVF1ZXJ5KFNJREVCQVJfQ09MTEFQU0VfTUVESUFfUVVFUlkpO1xuICAgIGNvbnN0IGZpbGVCcm93c2VyV2lkdGhPdmVycmlkZSA9IHVzZVN0b3JlKCRwYW5lV2lkdGhPdmVycmlkZShGSUxFX0JST1dTRVJfUEFORV9JRCkpO1xuICAgIGNvbnN0IGNvbm5lY3Rpb24gPSB1c2VTdG9yZSgkY29ubmVjdGlvbik7XG4gICAgY29uc3Qgdmlld3BvcnRGdWxsc2NyZWVuID0gdXNlU3luY0V4dGVybmFsU3RvcmUoc3Vic2NyaWJlV2luZG93U2l6ZSwgdmlld3BvcnRJc0Z1bGxzY3JlZW4sICgpID0+IGZhbHNlKTtcbiAgICBjb25zdCBpc0Z1bGxzY3JlZW4gPSBCb29sZWFuKGNvbm5lY3Rpb24/LmlzRnVsbHNjcmVlbikgfHwgdmlld3BvcnRGdWxsc2NyZWVuO1xuICAgIC8vIEV2ZXJ5IHNlY29uZGFyeSB3aW5kb3cgKG5ldy1zZXNzaW9uIHNjcmF0Y2gsIHN1YmFnZW50IHdhdGNoLCBjbWQtY2xpY2tcbiAgICAvLyBwb3Atb3V0KSBpcyBhIGNvbXBhY3Qgc2lkZSBwYW5lbCDigJQgbm9uZSBvZiB0aGVtIGNhcnJ5IHRoZSBmdWxsIHRpdGxlYmFyXG4gICAgLy8gdG9vbCBjbHVzdGVyLiBHYXRlIG9uIGlzU2Vjb25kYXJ5V2luZG93LCBuZXZlciB0aGUgbmFycm93ZXIgbmV3LXNlc3Npb24gZmxhZy5cbiAgICBjb25zdCBoaWRlVGl0bGViYXJDb250cm9scyA9IGlzU2Vjb25kYXJ5V2luZG93KCk7XG4gICAgY29uc3QgdGl0bGViYXJDb250cm9scyA9IHRpdGxlYmFyQ29udHJvbHNQb3NpdGlvbihjb25uZWN0aW9uPy53aW5kb3dCdXR0b25Qb3NpdGlvbiwgaXNGdWxsc2NyZWVuKTtcbiAgICAvLyBXaWR0aCBXaW5kb3dzL1dTTGcgcmVzZXJ2ZSBmb3IgdGhlIG5hdGl2ZSBtaW4vbWF4L2Nsb3NlIG92ZXJsYXkgKHplcm8gb25cbiAgICAvLyBtYWNPUywgd2hlcmUgd2luZG93IGNvbnRyb2xzIHNpdCBvbiB0aGUgbGVmdCBhbmQgYXJlIHJlcG9ydGVkIHZpYVxuICAgIC8vIHdpbmRvd0J1dHRvblBvc2l0aW9uIGluc3RlYWQpLiBUaGUgcmlnaHQgdG9vbCBjbHVzdGVyIGhhcyB0byBjbGVhciB0aGVtLlxuICAgIC8vIFByZWZlciB0aGUgRVhBQ1Qgd2lkdGggbWVhc3VyZWQgZnJvbSB0aGUgbGl2ZSBXaW5kb3cgQ29udHJvbHMgT3ZlcmxheVxuICAgIC8vIChwcmVjaXNlICsgc2VsZi1jb3JyZWN0aW5nIGFjcm9zcyBEUEkvaG9zdCB0aGVtZXMpOyBmYWxsIGJhY2sgdG8gdGhlIHN0YXRpY1xuICAgIC8vIHJlc2VydmF0aW9uIHRoZSBtYWluIHByb2Nlc3Mgc2VuZHMgd2hlbiB0aGUgV0NPIEFQSSBpc24ndCBhdmFpbGFibGUuXG4gICAgY29uc3QgbWVhc3VyZWRPdmVybGF5V2lkdGggPSB1c2VXaW5kb3dDb250cm9sc092ZXJsYXlXaWR0aCgpO1xuICAgIGNvbnN0IHN0YXRpY092ZXJsYXlXaWR0aCA9IGNvbm5lY3Rpb24/Lm5hdGl2ZU92ZXJsYXlXaWR0aCA/PyAwO1xuICAgIGNvbnN0IG5hdGl2ZU92ZXJsYXlXaWR0aCA9IG1lYXN1cmVkT3ZlcmxheVdpZHRoID8/IHN0YXRpY092ZXJsYXlXaWR0aDtcbiAgICBjb25zdCB0aXRsZWJhclRvb2xzUmlnaHQgPSBuYXRpdmVPdmVybGF5V2lkdGggPiAwID8gYCR7bmF0aXZlT3ZlcmxheVdpZHRofXB4YCA6ICcwLjc1cmVtJztcbiAgICAvLyBXaGVuIHRoZSBuYXRpdmUgd2luZG93IGNvbnRyb2xzIG92ZXJsYXkgb3VyIHRpdGxlYmFyIGJhbmQg4oCUIFdpbmRvd3MgYW5kXG4gICAgLy8gV1NMZyBib3RoIHBhaW50IEVsZWN0cm9uJ3MgV2luZG93IENvbnRyb2xzIE92ZXJsYXkgYW5kIHJlcG9ydFxuICAgIC8vIG5hdGl2ZU92ZXJsYXlXaWR0aCA+IDAg4oCUIHRoZSByaWdodCByYWlsJ3MgZWRpdG9yLXN0eWxlIHRhYiBzdHJpcCAod2hpY2hcbiAgICAvLyBub3JtYWxseSBsaXZlcyBJTiB0aGF0IGJhbmQpIHdvdWxkIHJlbmRlciBhdCB5PTAgdW5kZXIgdGhlIGZpeGVkIHRpdGxlYmFyXG4gICAgLy8gdG9vbCBjbHVzdGVyIGFuZCBjb2xsaWRlIHdpdGggaXQuIERyb3AgdGhlIHJpZ2h0IHJhaWwgb25lIHRpdGxlYmFyLWhlaWdodCBzb1xuICAgIC8vIGl0IG9wZW5zIEJFTE9XIHRoZSBiYW5kLiBtYWNPUyAvIHBsYWluIExpbnV4IHBhaW50IG5vIG92ZXJsYXkg4oaSIDAgaW5zZXQsXG4gICAgLy8gbGF5b3V0IGJ5dGUtZm9yLWJ5dGUgdW5jaGFuZ2VkLiBDb25zdW1lZCBhcyAtLXJpZ2h0LXJhaWwtdG9wLWluc2V0LlxuICAgIGNvbnN0IHJpZ2h0UmFpbFRvcEluc2V0ID0gbmF0aXZlT3ZlcmxheVdpZHRoID4gMCA/ICd2YXIoLS10aXRsZWJhci1oZWlnaHQpJyA6ICcwcHgnO1xuICAgIC8vIFRoZSBpbnNldCBjbGVhcnMgdGhlIHRvcC1sZWZ0IHRpdGxlYmFyIGJ1dHRvbnMgd2hlbiBub3RoaW5nIGNvdmVycyB0aGVcbiAgICAvLyB3aW5kb3cncyBsZWZ0IGVkZ2UuIERlZmF1bHQgbGF5b3V0OiB0aGUgc2Vzc2lvbnMgc2lkZWJhciBzaXRzIHRoZXJlLlxuICAgIC8vIEZsaXBwZWQgbGF5b3V0OiB0aGUgZmlsZSBicm93c2VyIGRvZXMgaW5zdGVhZC4gQm90aCBmb3JjZS1jb2xsYXBzZSB0byBhXG4gICAgLy8gaG92ZXItcmV2ZWFsIG92ZXJsYXkgKDBweCB0cmFjaykgYmVsb3cgdGhlIGNvbGxhcHNlIGJyZWFrcG9pbnQsIHNvIHRoZSBlZGdlXG4gICAgLy8gaXMgdW5jb3ZlcmVkIHRoZXJlIHJlZ2FyZGxlc3Mgb2YgdGhlaXIgc3RvcmVkIG9wZW4gc3RhdGUuIEEgc3RhbmRhbG9uZVxuICAgIC8vIHNlc3Npb24gd2luZG93IHJlbmRlcnMgbm8gc2lkZWJhciBhdCBhbGwsIHNvIGl0cyBlZGdlIGlzIGFsd2F5cyB1bmNvdmVyZWQuXG4gICAgY29uc3QgY29sbGFwc2libGVMZWZ0UGFuZU9wZW4gPSBwYW5lc0ZsaXBwZWQgPyBmaWxlQnJvd3Nlck9wZW4gOiBzaWRlYmFyT3BlbjtcbiAgICAvLyBUaGUgdGVybWluYWwgKyBwcmV2aWV3IHJhaWxzIG5ldmVyIGZvcmNlLWNvbGxhcHNlLCBzbyB3aGVuIHRoZXkncmUgdGhlXG4gICAgLy8gbGVmdG1vc3Qgb3BlbiBwYW5lIChmbGlwcGVkIGxheW91dCkgdGhleSBjb3ZlciB0aGUgZWRnZSBldmVuIHdoZW4gbmFycm93LlxuICAgIGNvbnN0IHBlcnNpc3RlbnRMZWZ0UGFuZU9wZW4gPSBwYW5lc0ZsaXBwZWQgJiYgKHRlcm1pbmFsUGFuZU9wZW4gfHwgcHJldmlld1BhbmVPcGVuKTtcbiAgICBjb25zdCBsZWZ0RWRnZVBhbmVPcGVuID0gIWlzU2Vjb25kYXJ5V2luZG93KCkgJiYgKCghbmFycm93Vmlld3BvcnQgJiYgY29sbGFwc2libGVMZWZ0UGFuZU9wZW4pIHx8IHBlcnNpc3RlbnRMZWZ0UGFuZU9wZW4pO1xuICAgIGNvbnN0IHRpdGxlYmFyQ29udGVudEluc2V0ID0gbGVmdEVkZ2VQYW5lT3BlblxuICAgICAgICA/IDBcbiAgICAgICAgOiB0aXRsZWJhckNvbnRyb2xzLmxlZnQgKyBUSVRMRUJBUl9IRUlHSFQgKyBNYXRoLnJvdW5kKFRJVExFQkFSX0hFSUdIVCAvIDIpO1xuICAgIC8vIFRoZSBzdGF0aWMgc3lzdGVtIGNsdXN0ZXIgKGhhcHRpY3MsIHByb2ZpbGVzLCBzZXR0aW5ncywgcmlnaHQtc2lkZWJhcikgaXNcbiAgICAvLyBoYXJkY29kZWQgaW4gVGl0bGViYXJDb250cm9scy4gUGFuZS1zdXBwbGllZCB0b29scyAocHJldmlldydzIGdyb3VwKSByZW5kZXJcbiAgICAvLyBpbiBhIHNlcGFyYXRlIGNsdXN0ZXIgYW5jaG9yZWQgZnVydGhlciBsZWZ0LlxuICAgIC8vXG4gICAgLy8gV2lkdGggbWF0aCBoYXMgdG8gaW5jbHVkZSB0aGUgYGdhcC14LTFgICgwLjI1cmVtKSBiZXR3ZWVuIGJ1dHRvbnM6XG4gICAgLy8gTiBidXR0b25zICsgKE4gLSAxKSBpbm5lciBnYXBzLCBwbHVzIG9uZSBleHRyYSAwLjI1cmVtIG9mIGJyZWF0aGluZyByb29tXG4gICAgLy8gYmV0d2VlbiB0aGUgcGFuZS10b29sIGNsdXN0ZXIgYW5kIHRoZSBzeXN0ZW0gY2x1c3RlciBzbyB0aGV5IGRvbid0IHNpdFxuICAgIC8vIGZsdXNoIGFnYWluc3QgZWFjaCBvdGhlci4gTW9kZWxlZCBhcyBOIGdhcHMgKE4gLSAxIGlubmVyICsgMSB0cmFpbGluZylcbiAgICAvLyB0byBrZWVwIHRoZSBmb3JtdWxhIGdlbmVyaWMgZm9yIGFueSBwYW5lLXRvb2wgY291bnQuXG4gICAgY29uc3QgU1lTVEVNX1RPT0xfQ09VTlQgPSA0O1xuICAgIGNvbnN0IHBhbmVUb29sQ291bnQgPSB0aXRsZWJhclRvb2xzPy5maWx0ZXIodG9vbCA9PiAhdG9vbC5oaWRkZW4pLmxlbmd0aCA/PyAwO1xuICAgIGNvbnN0IHN5c3RlbVRvb2xzV2lkdGggPSBgY2FsYygke1NZU1RFTV9UT09MX0NPVU5UfSAqICh2YXIoLS10aXRsZWJhci1jb250cm9sLXNpemUpICsgMC4yNXJlbSkpYDtcbiAgICBjb25zdCBmaWxlQnJvd3NlcldpZHRoID0gZmlsZUJyb3dzZXJXaWR0aE92ZXJyaWRlICE9PSB1bmRlZmluZWQgPyBgJHtmaWxlQnJvd3NlcldpZHRoT3ZlcnJpZGV9cHhgIDogRklMRV9CUk9XU0VSX0RFRkFVTFRfV0lEVEg7XG4gICAgLy8gV2hlcmUgdGhlIHBhbmUtdG9vbCBjbHVzdGVyJ3MgcmlnaHQgZWRnZSBzaXRzLCBtZWFzdXJlZCBmcm9tIHRoZSBpbm5lclxuICAgIC8vIHRpdGxlYmFyIHBhZGRpbmcgKC0tdGl0bGViYXItdG9vbHMtcmlnaHQpLiBUd28gYW5jaG9yczpcbiAgICAvLyAgIC0gZmlsZS1icm93c2VyIGNsb3NlZCDihpIgZmx1c2ggYWdhaW5zdCBzdGF0aWMgY2x1c3RlcidzIGxlZnQgZWRnZVxuICAgIC8vICAgLSBmaWxlLWJyb3dzZXIgb3BlbiAgIOKGkiBmbHVzaCBhZ2FpbnN0IHRoZSBmaWxlLWJyb3dzZXIgcGFuZSdzIGxlZnQgZWRnZVxuICAgIC8vICAgICAgICAgICAgICAgICAgICAgICAgICAgKD0gcHJldmlldyBwYW5lJ3MgcmlnaHQgZWRnZSlcbiAgICBjb25zdCBwcmV2aWV3VG9vbGJhckdhcCA9IGZpbGVCcm93c2VyT3BlbiA/IGZpbGVCcm93c2VyV2lkdGggOiBzeXN0ZW1Ub29sc1dpZHRoO1xuICAgIC8vIFVzZWQgYnkgdGhlIGRyYWcgcmVnaW9uIHRvIGtub3cgd2hlcmUgdGhlIHJpZ2h0bW9zdCBpbnRlcmFjdGl2ZSBlbGVtZW50XG4gICAgLy8gZW5kcy4gV2hlbiBwYW5lIHRvb2xzIGFyZSBwcmVzZW50LCB0aGF0J3MgYGdhcCArIHBhbmVDb3VudCAqIGNvbnRyb2xTaXplXG4gICAgLy8gKyBwYW5lQ291bnQgKiAwLjI1cmVtYCAodGhlIGxlZnRtb3N0IGJ1dHRvbiBpcyBhdCBgdG9vbHMtcmlnaHQgKyBnYXAgK1xuICAgIC8vIHBhbmVDb3VudCAqIChzaXplICsgZ2FwLXgtMSlgKS4gT3RoZXJ3aXNlIHRoZSBzdGF0aWMgY2x1c3RlcidzIGZvb3RwcmludFxuICAgIC8vIGlzIGVub3VnaC5cbiAgICBjb25zdCB0aXRsZWJhclRvb2xzV2lkdGggPSBwYW5lVG9vbENvdW50ID4gMFxuICAgICAgICA/IGBjYWxjKCR7cHJldmlld1Rvb2xiYXJHYXB9ICsgJHtwYW5lVG9vbENvdW50fSAqICh2YXIoLS10aXRsZWJhci1jb250cm9sLXNpemUpICsgMC4yNXJlbSkpYFxuICAgICAgICA6IHN5c3RlbVRvb2xzV2lkdGg7XG4gICAgcmV0dXJuIChfanN4cyhTaWRlYmFyUHJvdmlkZXIsIHsgY2xhc3NOYW1lOiBcImgtc2NyZWVuIG1pbi1oLTAgZmxleC1jb2wgYmctYmFja2dyb3VuZFwiLCBvbk9wZW5DaGFuZ2U6IHNldFNpZGViYXJPcGVuLCBvcGVuOiBzaWRlYmFyT3Blbiwgc3R5bGU6IHtcbiAgICAgICAgICAgIC8vIEFsaWFzIGZvciBzaGFkY24gPFNpZGViYXI+IGRlc2NlbmRhbnRzLiBSZXNvbHZlcyB0byB0aGUgY2hhdC1zaWRlYmFyXG4gICAgICAgICAgICAvLyBwYW5lIHRyYWNrIHZpYSBQYW5lU2hlbGwncyBlbWl0dGVkIC0tcGFuZS1jaGF0LXNpZGViYXItd2lkdGguXG4gICAgICAgICAgICAnLS1zaWRlYmFyLXdpZHRoJzogJ3ZhcigtLXBhbmUtY2hhdC1zaWRlYmFyLXdpZHRoKScsXG4gICAgICAgICAgICAnLS10aXRsZWJhci1oZWlnaHQnOiBgJHtUSVRMRUJBUl9IRUlHSFR9cHhgLFxuICAgICAgICAgICAgJy0tdGl0bGViYXItY29udGVudC1pbnNldCc6IGAke3RpdGxlYmFyQ29udGVudEluc2V0fXB4YCxcbiAgICAgICAgICAgICctLXRpdGxlYmFyLWNvbnRyb2xzLWxlZnQnOiBgJHt0aXRsZWJhckNvbnRyb2xzLmxlZnR9cHhgLFxuICAgICAgICAgICAgJy0tdGl0bGViYXItY29udHJvbHMtdG9wJzogYCR7dGl0bGViYXJDb250cm9scy50b3B9cHhgLFxuICAgICAgICAgICAgJy0tdGl0bGViYXItdG9vbHMtcmlnaHQnOiB0aXRsZWJhclRvb2xzUmlnaHQsXG4gICAgICAgICAgICAnLS10aXRsZWJhci10b29scy13aWR0aCc6IHRpdGxlYmFyVG9vbHNXaWR0aCxcbiAgICAgICAgICAgIC8vIERyb3BzIHRoZSByaWdodCByYWlsIGJlbG93IHRoZSB0aXRsZWJhciBiYW5kIHdoZW4gdGhlIE9TL2hvc3QgcGFpbnRzXG4gICAgICAgICAgICAvLyB3aW5kb3cgY29udHJvbHMgb3ZlciBpdCAoV2luZG93cy9XU0xnKTsgMHB4IGVsc2V3aGVyZS5cbiAgICAgICAgICAgICctLXJpZ2h0LXJhaWwtdG9wLWluc2V0JzogcmlnaHRSYWlsVG9wSW5zZXQsXG4gICAgICAgICAgICAvLyBBbmNob3IgZm9yIHRoZSBwYW5lLXRvb2wgY2x1c3RlcidzIHJpZ2h0IGVkZ2UgaW4gVGl0bGViYXJDb250cm9scy5cbiAgICAgICAgICAgIC8vIFNvdXJjZWQgZnJvbSB0aGUgbGF5b3V0IHN0b3JlIHJhdGhlciB0aGFuIHRoZSBQYW5lU2hlbGwtZW1pdHRlZFxuICAgICAgICAgICAgLy8gLS1wYW5lLSotd2lkdGggdmFycyBiZWNhdXNlIHRoZSB0aXRsZWJhciBpcyBhIHNpYmxpbmcgb2YgUGFuZVNoZWxsXG4gICAgICAgICAgICAvLyBhbmQgQ1NTIHZhcmlhYmxlcyByZXNvbHZlIGF0IHRoZSBjb25zdW1lcidzIHNjb3BlLlxuICAgICAgICAgICAgJy0tc2hlbGwtcHJldmlldy10b29sYmFyLWdhcCc6IHByZXZpZXdUb29sYmFyR2FwXG4gICAgICAgIH0sIGNoaWxkcmVuOiBbIWhpZGVUaXRsZWJhckNvbnRyb2xzICYmIChfanN4KFRpdGxlYmFyQ29udHJvbHMsIHsgbGVmdFRvb2xzOiBsZWZ0VGl0bGViYXJUb29scywgb25PcGVuU2V0dGluZ3M6IG9uT3BlblNldHRpbmdzLCB0b29sczogdGl0bGViYXJUb29scyB9KSksIG5hdGl2ZU92ZXJsYXlXaWR0aCA+IDAgJiYgKF9qc3goXCJkaXZcIiwgeyBcImFyaWEtaGlkZGVuXCI6IHRydWUsIGNsYXNzTmFtZTogXCJwb2ludGVyLWV2ZW50cy1ub25lIGZpeGVkIHJpZ2h0LTAgdG9wLTAgei1bNF0gaC0oLS10aXRsZWJhci1oZWlnaHQpIHctKC0tdGl0bGViYXItdG9vbHMtcmlnaHQpIGJvcmRlci1iIGJvcmRlci0oLS11aS1zdHJva2UtdGVydGlhcnkpIGJnLSgtLXVpLWNoYXQtc3VyZmFjZS1iYWNrZ3JvdW5kKVwiIH0pKSwgX2pzeHMoXCJtYWluXCIsIHsgY2xhc3NOYW1lOiBcInJlbGF0aXZlIHotMyBmbGV4IG1pbi1oLTAgdy1mdWxsIGZsZXgtMSBmbGV4LWNvbCBvdmVyZmxvdy1oaWRkZW4gdHJhbnNpdGlvbi1ub25lXCIsIGNoaWxkcmVuOiBbX2pzeHMoUGFuZVNoZWxsLCB7IGNsYXNzTmFtZTogXCJtaW4taC0wIGZsZXgtMVwiLCBjaGlsZHJlbjogW19qc3goXCJkaXZcIiwgeyBcImFyaWEtaGlkZGVuXCI6IFwidHJ1ZVwiLCBjbGFzc05hbWU6IFwicG9pbnRlci1ldmVudHMtbm9uZSBhYnNvbHV0ZSBsZWZ0LTAgdG9wLTAgei0xIGgtKC0tdGl0bGViYXItaGVpZ2h0KSB3LSgtLXRpdGxlYmFyLWNvbnRyb2xzLWxlZnQpIFstd2Via2l0LWFwcC1yZWdpb246ZHJhZ11cIiB9KSwgX2pzeChcImRpdlwiLCB7IFwiYXJpYS1oaWRkZW5cIjogXCJ0cnVlXCIsIGNsYXNzTmFtZTogXCJwb2ludGVyLWV2ZW50cy1ub25lIGFic29sdXRlIHRvcC0wIHotMSBoLSgtLXRpdGxlYmFyLWhlaWdodCkgbGVmdC1bY2FsYyh2YXIoLS10aXRsZWJhci1jb250cm9scy1sZWZ0KSsodmFyKC0tdGl0bGViYXItY29udHJvbC1zaXplKSoyKSswLjc1cmVtKV0gcmlnaHQtW2NhbGModmFyKC0tdGl0bGViYXItdG9vbHMtcmlnaHQpK3ZhcigtLXRpdGxlYmFyLXRvb2xzLXdpZHRoKSswLjc1cmVtKV0gWy13ZWJraXQtYXBwLXJlZ2lvbjpkcmFnXVwiIH0pLCBjaGlsZHJlbl0gfSksIG1haW5PdmVybGF5cywgIWlzU2Vjb25kYXJ5V2luZG93KCkgJiYgX2pzeChTdGF0dXNiYXJDb250cm9scywgeyBpdGVtczogc3RhdHVzYmFySXRlbXMsIGxlZnRJdGVtczogbGVmdFN0YXR1c2Jhckl0ZW1zIH0pXSB9KSwgb3ZlcmxheXMsIF9qc3goS2V5YmluZFBhbmVsLCB7fSksIF9qc3goTm90aWZpY2F0aW9uU3RhY2ssIHt9KSwgX2pzeChGbG9hdGluZ1BldCwge30pXSB9KSk7XG59XG4iXX0=

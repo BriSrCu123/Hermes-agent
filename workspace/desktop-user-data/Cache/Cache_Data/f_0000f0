@@ -1,0 +1,208 @@
+import { atom } from "/node_modules/.vite/deps/nanostores.js?v=d550b4c6";
+import { persistBoolean, persistString, storedBoolean, storedString } from "/src/lib/storage.js";
+import { $petActivity, $petInfo, $petUnread, clearPetUnread } from "/src/store/pet.js";
+import { $awaitingResponse, $busy } from "/src/store/session.js";
+// Persisted across restarts: was the pet popped out, and where on the desktop
+// did the user leave it. Keyed v1; bump if the bounds shape ever changes.
+const OVERLAY_ACTIVE_KEY = "hermes.desktop.pet-overlay-active.v1";
+const OVERLAY_BOUNDS_KEY = "hermes.desktop.pet-overlay-bounds.v1";
+export const $petOverlayActive = atom(storedBoolean(OVERLAY_ACTIVE_KEY, false));
+// Persist the in/out choice so a popped-out pet comes back popped out.
+$petOverlayActive.subscribe((active) => persistBoolean(OVERLAY_ACTIVE_KEY, active));
+function loadSavedBounds() {
+	try {
+		const raw = storedString(OVERLAY_BOUNDS_KEY);
+		if (!raw) {
+			return null;
+		}
+		const parsed = JSON.parse(raw);
+		if (typeof parsed.x === "number" && typeof parsed.y === "number" && typeof parsed.width === "number" && typeof parsed.height === "number") {
+			return {
+				height: parsed.height,
+				width: parsed.width,
+				x: parsed.x,
+				y: parsed.y
+			};
+		}
+	} catch {}
+	return null;
+}
+function saveBounds(bounds) {
+	persistString(OVERLAY_BOUNDS_KEY, JSON.stringify(bounds));
+}
+// The overlay window is padded around the sprite so the bubble (above), the
+// drag area, and the pop-up composer all have room; the pet sits near the
+// bottom and the rest of the rectangle is transparent + click-through.
+const OVERLAY_PAD_X = 100;
+const OVERLAY_PAD_Y = 200;
+const OVERLAY_MIN_W = 240;
+const OVERLAY_MIN_H = 300;
+/**
+* Window bounds (width/height) that fully contain the pet at a given scale, plus
+* the padding for its bubble/composer/drag margins. The single source of truth
+* for both the initial pop-out size and the live wheel-to-scale resize, so the
+* sprite is never cropped by the window edge no matter how big it's scaled.
+*/
+export function overlayWindowSize(frameW, frameH, scale) {
+	return {
+		width: Math.max(OVERLAY_MIN_W, Math.round(frameW * scale + OVERLAY_PAD_X)),
+		height: Math.max(OVERLAY_MIN_H, Math.round(frameH * scale + OVERLAY_PAD_Y))
+	};
+}
+let stateUnsubs = [];
+let controlUnsub = null;
+let submitHandler = null;
+let openAppHandler = null;
+let scaleHandler = null;
+function currentPayload() {
+	return {
+		info: $petInfo.get(),
+		activity: $petActivity.get(),
+		busy: $busy.get(),
+		awaiting: $awaitingResponse.get(),
+		unread: $petUnread.get()
+	};
+}
+function pushNow() {
+	window.hermesDesktop?.petOverlay?.pushState(currentPayload());
+}
+/**
+* Open the overlay window and start mirroring live state into it. The main
+* process echoes back the actual screen bounds it used, which we persist so the
+* pet reopens exactly where the user left it.
+*/
+function openOverlay(request) {
+	const api = window.hermesDesktop?.petOverlay;
+	if (!api || stateUnsubs.length) {
+		return;
+	}
+	$petOverlayActive.set(true);
+	void api.open(request).then((res) => {
+		if (res?.bounds) {
+			saveBounds(res.bounds);
+		}
+		pushNow();
+	});
+	// Mirror live state into the overlay. subscribe() fires immediately, so the
+	// overlay also gets a first frame the moment it's ready (it asks via 'ready').
+	stateUnsubs = [
+		$petInfo.subscribe(pushNow),
+		$petActivity.subscribe(pushNow),
+		$busy.subscribe(pushNow),
+		$awaitingResponse.subscribe(pushNow),
+		$petUnread.subscribe(pushNow)
+	];
+}
+/**
+* Pop the pet out of the window. `petRect` is the in-window sprite's viewport
+* rect; we grow it to the padded overlay size and center the window on the
+* pet's old spot (main.ts adds the window's screen origin). If the user has
+* popped out before, reopen at that remembered desktop spot instead.
+*/
+export function popOutPet(petRect) {
+	if ($petOverlayActive.get() || stateUnsubs.length) {
+		return;
+	}
+	const saved = loadSavedBounds();
+	if (saved) {
+		openOverlay({
+			bounds: saved,
+			screen: true
+		});
+		return;
+	}
+	// Size the window off the pet's scale (not the measured rect, which includes
+	// the shadow) so it matches the live resize math exactly — no jump on open.
+	const pet = $petInfo.get();
+	const { width, height } = overlayWindowSize(pet.frameW ?? 192, pet.frameH ?? 208, pet.scale ?? .33);
+	const x = Math.round(petRect.x - (width - petRect.width) / 2);
+	const y = Math.round(petRect.y - (height - petRect.height) / 2);
+	openOverlay({
+		bounds: {
+			height,
+			width,
+			x,
+			y
+		},
+		screen: false
+	});
+}
+/**
+* Restore the overlay on boot if the pet was popped out when the app last
+* closed. Requires a remembered desktop spot — without one we fall back to the
+* in-window pet rather than spawning an orphan window at the origin.
+*/
+export function restorePetOverlay() {
+	if (!window.hermesDesktop?.petOverlay || !$petOverlayActive.get() || stateUnsubs.length) {
+		return;
+	}
+	const saved = loadSavedBounds();
+	if (!saved) {
+		$petOverlayActive.set(false);
+		return;
+	}
+	openOverlay({
+		bounds: saved,
+		screen: true
+	});
+}
+/** Pop the pet back into the window (closes the overlay window). */
+export function popInPet() {
+	for (const off of stateUnsubs) {
+		off();
+	}
+	stateUnsubs = [];
+	$petOverlayActive.set(false);
+	void window.hermesDesktop?.petOverlay?.close();
+}
+/** Register the handler that turns an overlay composer submit into a real send. */
+export function setPetOverlaySubmitHandler(fn) {
+	submitHandler = fn;
+}
+/** Register the handler that opens the app to the most recent thread (mail icon). */
+export function setPetOverlayOpenAppHandler(fn) {
+	openAppHandler = fn;
+}
+/** Register the handler that persists a scale resized via the overlay's Alt+wheel gesture. */
+export function setPetOverlayScaleHandler(fn) {
+	scaleHandler = fn;
+}
+/**
+* Wire the overlay→renderer control channel once. Returns a disposer. Idempotent
+* — a second call while already wired is a no-op.
+*/
+export function initPetOverlayBridge() {
+	const api = window.hermesDesktop?.petOverlay;
+	if (!api || controlUnsub) {
+		return () => {};
+	}
+	controlUnsub = api.onControl((payload) => {
+		if (payload?.type === "pop-in") {
+			popInPet();
+		} else if (payload?.type === "ready") {
+			// The overlay just mounted — hand it the current frame.
+			pushNow();
+		} else if (payload?.type === "submit" && typeof payload.text === "string") {
+			submitHandler?.(payload.text);
+		} else if (payload?.type === "bounds" && payload.bounds) {
+			// The user dragged the overlay to a new desktop spot — remember it.
+			saveBounds(payload.bounds);
+		} else if (payload?.type === "scale" && typeof payload.scale === "number") {
+			// The user resized the popped-out pet (Alt+wheel) — persist it through
+			// the main renderer's gateway; the new scale rides $petInfo back to the
+			// overlay on the next push, keeping both surfaces in sync.
+			scaleHandler?.(payload.scale);
+		} else if (payload?.type === "open-app") {
+			// Mail icon: surface the app on the most recent thread (main.ts already
+			// focused the window before forwarding this) and mark it read.
+			clearPetUnread();
+			openAppHandler?.();
+		}
+	});
+	return () => {
+		controlUnsub?.();
+		controlUnsub = null;
+	};
+}
+
+//# sourceMappingURL=data:application/json;base64,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QUFRO0VBQ1osT0FDSyxJQUFJLFNBQVMsU0FBUyxZQUFZLE9BQU8sUUFBUSxTQUFTLFVBQVU7R0FDckUsZ0JBQWdCLFFBQVEsSUFBSTtFQUNoQyxPQUNLLElBQUksU0FBUyxTQUFTLFlBQVksUUFBUSxRQUFROztHQUVuRCxXQUFXLFFBQVEsTUFBTTtFQUM3QixPQUNLLElBQUksU0FBUyxTQUFTLFdBQVcsT0FBTyxRQUFRLFVBQVUsVUFBVTs7OztHQUlyRSxlQUFlLFFBQVEsS0FBSztFQUNoQyxPQUNLLElBQUksU0FBUyxTQUFTLFlBQVk7OztHQUduQyxlQUFlO0dBQ2YsaUJBQWlCO0VBQ3JCO0NBQ0osQ0FBQztDQUNELGFBQWE7RUFDVCxlQUFlO0VBQ2YsZUFBZTtDQUNuQjtBQUNKIiwibmFtZXMiOltdLCJzb3VyY2VzIjpbInBldC1vdmVybGF5LmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGF0b20gfSBmcm9tICduYW5vc3RvcmVzJztcbmltcG9ydCB7IHBlcnNpc3RCb29sZWFuLCBwZXJzaXN0U3RyaW5nLCBzdG9yZWRCb29sZWFuLCBzdG9yZWRTdHJpbmcgfSBmcm9tICdAL2xpYi9zdG9yYWdlJztcbmltcG9ydCB7ICRwZXRBY3Rpdml0eSwgJHBldEluZm8sICRwZXRVbnJlYWQsIGNsZWFyUGV0VW5yZWFkIH0gZnJvbSAnQC9zdG9yZS9wZXQnO1xuaW1wb3J0IHsgJGF3YWl0aW5nUmVzcG9uc2UsICRidXN5IH0gZnJvbSAnQC9zdG9yZS9zZXNzaW9uJztcbi8vIFBlcnNpc3RlZCBhY3Jvc3MgcmVzdGFydHM6IHdhcyB0aGUgcGV0IHBvcHBlZCBvdXQsIGFuZCB3aGVyZSBvbiB0aGUgZGVza3RvcFxuLy8gZGlkIHRoZSB1c2VyIGxlYXZlIGl0LiBLZXllZCB2MTsgYnVtcCBpZiB0aGUgYm91bmRzIHNoYXBlIGV2ZXIgY2hhbmdlcy5cbmNvbnN0IE9WRVJMQVlfQUNUSVZFX0tFWSA9ICdoZXJtZXMuZGVza3RvcC5wZXQtb3ZlcmxheS1hY3RpdmUudjEnO1xuY29uc3QgT1ZFUkxBWV9CT1VORFNfS0VZID0gJ2hlcm1lcy5kZXNrdG9wLnBldC1vdmVybGF5LWJvdW5kcy52MSc7XG5leHBvcnQgY29uc3QgJHBldE92ZXJsYXlBY3RpdmUgPSBhdG9tKHN0b3JlZEJvb2xlYW4oT1ZFUkxBWV9BQ1RJVkVfS0VZLCBmYWxzZSkpO1xuLy8gUGVyc2lzdCB0aGUgaW4vb3V0IGNob2ljZSBzbyBhIHBvcHBlZC1vdXQgcGV0IGNvbWVzIGJhY2sgcG9wcGVkIG91dC5cbiRwZXRPdmVybGF5QWN0aXZlLnN1YnNjcmliZShhY3RpdmUgPT4gcGVyc2lzdEJvb2xlYW4oT1ZFUkxBWV9BQ1RJVkVfS0VZLCBhY3RpdmUpKTtcbmZ1bmN0aW9uIGxvYWRTYXZlZEJvdW5kcygpIHtcbiAgICB0cnkge1xuICAgICAgICBjb25zdCByYXcgPSBzdG9yZWRTdHJpbmcoT1ZFUkxBWV9CT1VORFNfS0VZKTtcbiAgICAgICAgaWYgKCFyYXcpIHtcbiAgICAgICAgICAgIHJldHVybiBudWxsO1xuICAgICAgICB9XG4gICAgICAgIGNvbnN0IHBhcnNlZCA9IEpTT04ucGFyc2UocmF3KTtcbiAgICAgICAgaWYgKHR5cGVvZiBwYXJzZWQueCA9PT0gJ251bWJlcicgJiZcbiAgICAgICAgICAgIHR5cGVvZiBwYXJzZWQueSA9PT0gJ251bWJlcicgJiZcbiAgICAgICAgICAgIHR5cGVvZiBwYXJzZWQud2lkdGggPT09ICdudW1iZXInICYmXG4gICAgICAgICAgICB0eXBlb2YgcGFyc2VkLmhlaWdodCA9PT0gJ251bWJlcicpIHtcbiAgICAgICAgICAgIHJldHVybiB7IGhlaWdodDogcGFyc2VkLmhlaWdodCwgd2lkdGg6IHBhcnNlZC53aWR0aCwgeDogcGFyc2VkLngsIHk6IHBhcnNlZC55IH07XG4gICAgICAgIH1cbiAgICB9XG4gICAgY2F0Y2gge1xuICAgICAgICAvLyBmYWxsIHRocm91Z2ggdG8gbnVsbFxuICAgIH1cbiAgICByZXR1cm4gbnVsbDtcbn1cbmZ1bmN0aW9uIHNhdmVCb3VuZHMoYm91bmRzKSB7XG4gICAgcGVyc2lzdFN0cmluZyhPVkVSTEFZX0JPVU5EU19LRVksIEpTT04uc3RyaW5naWZ5KGJvdW5kcykpO1xufVxuLy8gVGhlIG92ZXJsYXkgd2luZG93IGlzIHBhZGRlZCBhcm91bmQgdGhlIHNwcml0ZSBzbyB0aGUgYnViYmxlIChhYm92ZSksIHRoZVxuLy8gZHJhZyBhcmVhLCBhbmQgdGhlIHBvcC11cCBjb21wb3NlciBhbGwgaGF2ZSByb29tOyB0aGUgcGV0IHNpdHMgbmVhciB0aGVcbi8vIGJvdHRvbSBhbmQgdGhlIHJlc3Qgb2YgdGhlIHJlY3RhbmdsZSBpcyB0cmFuc3BhcmVudCArIGNsaWNrLXRocm91Z2guXG5jb25zdCBPVkVSTEFZX1BBRF9YID0gMTAwO1xuY29uc3QgT1ZFUkxBWV9QQURfWSA9IDIwMDtcbmNvbnN0IE9WRVJMQVlfTUlOX1cgPSAyNDA7XG5jb25zdCBPVkVSTEFZX01JTl9IID0gMzAwO1xuLyoqXG4gKiBXaW5kb3cgYm91bmRzICh3aWR0aC9oZWlnaHQpIHRoYXQgZnVsbHkgY29udGFpbiB0aGUgcGV0IGF0IGEgZ2l2ZW4gc2NhbGUsIHBsdXNcbiAqIHRoZSBwYWRkaW5nIGZvciBpdHMgYnViYmxlL2NvbXBvc2VyL2RyYWcgbWFyZ2lucy4gVGhlIHNpbmdsZSBzb3VyY2Ugb2YgdHJ1dGhcbiAqIGZvciBib3RoIHRoZSBpbml0aWFsIHBvcC1vdXQgc2l6ZSBhbmQgdGhlIGxpdmUgd2hlZWwtdG8tc2NhbGUgcmVzaXplLCBzbyB0aGVcbiAqIHNwcml0ZSBpcyBuZXZlciBjcm9wcGVkIGJ5IHRoZSB3aW5kb3cgZWRnZSBubyBtYXR0ZXIgaG93IGJpZyBpdCdzIHNjYWxlZC5cbiAqL1xuZXhwb3J0IGZ1bmN0aW9uIG92ZXJsYXlXaW5kb3dTaXplKGZyYW1lVywgZnJhbWVILCBzY2FsZSkge1xuICAgIHJldHVybiB7XG4gICAgICAgIHdpZHRoOiBNYXRoLm1heChPVkVSTEFZX01JTl9XLCBNYXRoLnJvdW5kKGZyYW1lVyAqIHNjYWxlICsgT1ZFUkxBWV9QQURfWCkpLFxuICAgICAgICBoZWlnaHQ6IE1hdGgubWF4KE9WRVJMQVlfTUlOX0gsIE1hdGgucm91bmQoZnJhbWVIICogc2NhbGUgKyBPVkVSTEFZX1BBRF9ZKSlcbiAgICB9O1xufVxubGV0IHN0YXRlVW5zdWJzID0gW107XG5sZXQgY29udHJvbFVuc3ViID0gbnVsbDtcbmxldCBzdWJtaXRIYW5kbGVyID0gbnVsbDtcbmxldCBvcGVuQXBwSGFuZGxlciA9IG51bGw7XG5sZXQgc2NhbGVIYW5kbGVyID0gbnVsbDtcbmZ1bmN0aW9uIGN1cnJlbnRQYXlsb2FkKCkge1xuICAgIHJldHVybiB7XG4gICAgICAgIGluZm86ICRwZXRJbmZvLmdldCgpLFxuICAgICAgICBhY3Rpdml0eTogJHBldEFjdGl2aXR5LmdldCgpLFxuICAgICAgICBidXN5OiAkYnVzeS5nZXQoKSxcbiAgICAgICAgYXdhaXRpbmc6ICRhd2FpdGluZ1Jlc3BvbnNlLmdldCgpLFxuICAgICAgICB1bnJlYWQ6ICRwZXRVbnJlYWQuZ2V0KClcbiAgICB9O1xufVxuZnVuY3Rpb24gcHVzaE5vdygpIHtcbiAgICB3aW5kb3cuaGVybWVzRGVza3RvcD8ucGV0T3ZlcmxheT8ucHVzaFN0YXRlKGN1cnJlbnRQYXlsb2FkKCkpO1xufVxuLyoqXG4gKiBPcGVuIHRoZSBvdmVybGF5IHdpbmRvdyBhbmQgc3RhcnQgbWlycm9yaW5nIGxpdmUgc3RhdGUgaW50byBpdC4gVGhlIG1haW5cbiAqIHByb2Nlc3MgZWNob2VzIGJhY2sgdGhlIGFjdHVhbCBzY3JlZW4gYm91bmRzIGl0IHVzZWQsIHdoaWNoIHdlIHBlcnNpc3Qgc28gdGhlXG4gKiBwZXQgcmVvcGVucyBleGFjdGx5IHdoZXJlIHRoZSB1c2VyIGxlZnQgaXQuXG4gKi9cbmZ1bmN0aW9uIG9wZW5PdmVybGF5KHJlcXVlc3QpIHtcbiAgICBjb25zdCBhcGkgPSB3aW5kb3cuaGVybWVzRGVza3RvcD8ucGV0T3ZlcmxheTtcbiAgICBpZiAoIWFwaSB8fCBzdGF0ZVVuc3Vicy5sZW5ndGgpIHtcbiAgICAgICAgcmV0dXJuO1xuICAgIH1cbiAgICAkcGV0T3ZlcmxheUFjdGl2ZS5zZXQodHJ1ZSk7XG4gICAgdm9pZCBhcGkub3BlbihyZXF1ZXN0KS50aGVuKHJlcyA9PiB7XG4gICAgICAgIGlmIChyZXM/LmJvdW5kcykge1xuICAgICAgICAgICAgc2F2ZUJvdW5kcyhyZXMuYm91bmRzKTtcbiAgICAgICAgfVxuICAgICAgICBwdXNoTm93KCk7XG4gICAgfSk7XG4gICAgLy8gTWlycm9yIGxpdmUgc3RhdGUgaW50byB0aGUgb3ZlcmxheS4gc3Vic2NyaWJlKCkgZmlyZXMgaW1tZWRpYXRlbHksIHNvIHRoZVxuICAgIC8vIG92ZXJsYXkgYWxzbyBnZXRzIGEgZmlyc3QgZnJhbWUgdGhlIG1vbWVudCBpdCdzIHJlYWR5IChpdCBhc2tzIHZpYSAncmVhZHknKS5cbiAgICBzdGF0ZVVuc3VicyA9IFtcbiAgICAgICAgJHBldEluZm8uc3Vic2NyaWJlKHB1c2hOb3cpLFxuICAgICAgICAkcGV0QWN0aXZpdHkuc3Vic2NyaWJlKHB1c2hOb3cpLFxuICAgICAgICAkYnVzeS5zdWJzY3JpYmUocHVzaE5vdyksXG4gICAgICAgICRhd2FpdGluZ1Jlc3BvbnNlLnN1YnNjcmliZShwdXNoTm93KSxcbiAgICAgICAgJHBldFVucmVhZC5zdWJzY3JpYmUocHVzaE5vdylcbiAgICBdO1xufVxuLyoqXG4gKiBQb3AgdGhlIHBldCBvdXQgb2YgdGhlIHdpbmRvdy4gYHBldFJlY3RgIGlzIHRoZSBpbi13aW5kb3cgc3ByaXRlJ3Mgdmlld3BvcnRcbiAqIHJlY3Q7IHdlIGdyb3cgaXQgdG8gdGhlIHBhZGRlZCBvdmVybGF5IHNpemUgYW5kIGNlbnRlciB0aGUgd2luZG93IG9uIHRoZVxuICogcGV0J3Mgb2xkIHNwb3QgKG1haW4udHMgYWRkcyB0aGUgd2luZG93J3Mgc2NyZWVuIG9yaWdpbikuIElmIHRoZSB1c2VyIGhhc1xuICogcG9wcGVkIG91dCBiZWZvcmUsIHJlb3BlbiBhdCB0aGF0IHJlbWVtYmVyZWQgZGVza3RvcCBzcG90IGluc3RlYWQuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiBwb3BPdXRQZXQocGV0UmVjdCkge1xuICAgIGlmICgkcGV0T3ZlcmxheUFjdGl2ZS5nZXQoKSB8fCBzdGF0ZVVuc3Vicy5sZW5ndGgpIHtcbiAgICAgICAgcmV0dXJuO1xuICAgIH1cbiAgICBjb25zdCBzYXZlZCA9IGxvYWRTYXZlZEJvdW5kcygpO1xuICAgIGlmIChzYXZlZCkge1xuICAgICAgICBvcGVuT3ZlcmxheSh7IGJvdW5kczogc2F2ZWQsIHNjcmVlbjogdHJ1ZSB9KTtcbiAgICAgICAgcmV0dXJuO1xuICAgIH1cbiAgICAvLyBTaXplIHRoZSB3aW5kb3cgb2ZmIHRoZSBwZXQncyBzY2FsZSAobm90IHRoZSBtZWFzdXJlZCByZWN0LCB3aGljaCBpbmNsdWRlc1xuICAgIC8vIHRoZSBzaGFkb3cpIHNvIGl0IG1hdGNoZXMgdGhlIGxpdmUgcmVzaXplIG1hdGggZXhhY3RseSDigJQgbm8ganVtcCBvbiBvcGVuLlxuICAgIGNvbnN0IHBldCA9ICRwZXRJbmZvLmdldCgpO1xuICAgIGNvbnN0IHsgd2lkdGgsIGhlaWdodCB9ID0gb3ZlcmxheVdpbmRvd1NpemUocGV0LmZyYW1lVyA/PyAxOTIsIHBldC5mcmFtZUggPz8gMjA4LCBwZXQuc2NhbGUgPz8gMC4zMyk7XG4gICAgY29uc3QgeCA9IE1hdGgucm91bmQocGV0UmVjdC54IC0gKHdpZHRoIC0gcGV0UmVjdC53aWR0aCkgLyAyKTtcbiAgICBjb25zdCB5ID0gTWF0aC5yb3VuZChwZXRSZWN0LnkgLSAoaGVpZ2h0IC0gcGV0UmVjdC5oZWlnaHQpIC8gMik7XG4gICAgb3Blbk92ZXJsYXkoeyBib3VuZHM6IHsgaGVpZ2h0LCB3aWR0aCwgeCwgeSB9LCBzY3JlZW46IGZhbHNlIH0pO1xufVxuLyoqXG4gKiBSZXN0b3JlIHRoZSBvdmVybGF5IG9uIGJvb3QgaWYgdGhlIHBldCB3YXMgcG9wcGVkIG91dCB3aGVuIHRoZSBhcHAgbGFzdFxuICogY2xvc2VkLiBSZXF1aXJlcyBhIHJlbWVtYmVyZWQgZGVza3RvcCBzcG90IOKAlCB3aXRob3V0IG9uZSB3ZSBmYWxsIGJhY2sgdG8gdGhlXG4gKiBpbi13aW5kb3cgcGV0IHJhdGhlciB0aGFuIHNwYXduaW5nIGFuIG9ycGhhbiB3aW5kb3cgYXQgdGhlIG9yaWdpbi5cbiAqL1xuZXhwb3J0IGZ1bmN0aW9uIHJlc3RvcmVQZXRPdmVybGF5KCkge1xuICAgIGlmICghd2luZG93Lmhlcm1lc0Rlc2t0b3A/LnBldE92ZXJsYXkgfHwgISRwZXRPdmVybGF5QWN0aXZlLmdldCgpIHx8IHN0YXRlVW5zdWJzLmxlbmd0aCkge1xuICAgICAgICByZXR1cm47XG4gICAgfVxuICAgIGNvbnN0IHNhdmVkID0gbG9hZFNhdmVkQm91bmRzKCk7XG4gICAgaWYgKCFzYXZlZCkge1xuICAgICAgICAkcGV0T3ZlcmxheUFjdGl2ZS5zZXQoZmFsc2UpO1xuICAgICAgICByZXR1cm47XG4gICAgfVxuICAgIG9wZW5PdmVybGF5KHsgYm91bmRzOiBzYXZlZCwgc2NyZWVuOiB0cnVlIH0pO1xufVxuLyoqIFBvcCB0aGUgcGV0IGJhY2sgaW50byB0aGUgd2luZG93IChjbG9zZXMgdGhlIG92ZXJsYXkgd2luZG93KS4gKi9cbmV4cG9ydCBmdW5jdGlvbiBwb3BJblBldCgpIHtcbiAgICBmb3IgKGNvbnN0IG9mZiBvZiBzdGF0ZVVuc3Vicykge1xuICAgICAgICBvZmYoKTtcbiAgICB9XG4gICAgc3RhdGVVbnN1YnMgPSBbXTtcbiAgICAkcGV0T3ZlcmxheUFjdGl2ZS5zZXQoZmFsc2UpO1xuICAgIHZvaWQgd2luZG93Lmhlcm1lc0Rlc2t0b3A/LnBldE92ZXJsYXk/LmNsb3NlKCk7XG59XG4vKiogUmVnaXN0ZXIgdGhlIGhhbmRsZXIgdGhhdCB0dXJucyBhbiBvdmVybGF5IGNvbXBvc2VyIHN1Ym1pdCBpbnRvIGEgcmVhbCBzZW5kLiAqL1xuZXhwb3J0IGZ1bmN0aW9uIHNldFBldE92ZXJsYXlTdWJtaXRIYW5kbGVyKGZuKSB7XG4gICAgc3VibWl0SGFuZGxlciA9IGZuO1xufVxuLyoqIFJlZ2lzdGVyIHRoZSBoYW5kbGVyIHRoYXQgb3BlbnMgdGhlIGFwcCB0byB0aGUgbW9zdCByZWNlbnQgdGhyZWFkIChtYWlsIGljb24pLiAqL1xuZXhwb3J0IGZ1bmN0aW9uIHNldFBldE92ZXJsYXlPcGVuQXBwSGFuZGxlcihmbikge1xuICAgIG9wZW5BcHBIYW5kbGVyID0gZm47XG59XG4vKiogUmVnaXN0ZXIgdGhlIGhhbmRsZXIgdGhhdCBwZXJzaXN0cyBhIHNjYWxlIHJlc2l6ZWQgdmlhIHRoZSBvdmVybGF5J3MgQWx0K3doZWVsIGdlc3R1cmUuICovXG5leHBvcnQgZnVuY3Rpb24gc2V0UGV0T3ZlcmxheVNjYWxlSGFuZGxlcihmbikge1xuICAgIHNjYWxlSGFuZGxlciA9IGZuO1xufVxuLyoqXG4gKiBXaXJlIHRoZSBvdmVybGF54oaScmVuZGVyZXIgY29udHJvbCBjaGFubmVsIG9uY2UuIFJldHVybnMgYSBkaXNwb3Nlci4gSWRlbXBvdGVudFxuICog4oCUIGEgc2Vjb25kIGNhbGwgd2hpbGUgYWxyZWFkeSB3aXJlZCBpcyBhIG5vLW9wLlxuICovXG5leHBvcnQgZnVuY3Rpb24gaW5pdFBldE92ZXJsYXlCcmlkZ2UoKSB7XG4gICAgY29uc3QgYXBpID0gd2luZG93Lmhlcm1lc0Rlc2t0b3A/LnBldE92ZXJsYXk7XG4gICAgaWYgKCFhcGkgfHwgY29udHJvbFVuc3ViKSB7XG4gICAgICAgIHJldHVybiAoKSA9PiB7IH07XG4gICAgfVxuICAgIGNvbnRyb2xVbnN1YiA9IGFwaS5vbkNvbnRyb2wocGF5bG9hZCA9PiB7XG4gICAgICAgIGlmIChwYXlsb2FkPy50eXBlID09PSAncG9wLWluJykge1xuICAgICAgICAgICAgcG9wSW5QZXQoKTtcbiAgICAgICAgfVxuICAgICAgICBlbHNlIGlmIChwYXlsb2FkPy50eXBlID09PSAncmVhZHknKSB7XG4gICAgICAgICAgICAvLyBUaGUgb3ZlcmxheSBqdXN0IG1vdW50ZWQg4oCUIGhhbmQgaXQgdGhlIGN1cnJlbnQgZnJhbWUuXG4gICAgICAgICAgICBwdXNoTm93KCk7XG4gICAgICAgIH1cbiAgICAgICAgZWxzZSBpZiAocGF5bG9hZD8udHlwZSA9PT0gJ3N1Ym1pdCcgJiYgdHlwZW9mIHBheWxvYWQudGV4dCA9PT0gJ3N0cmluZycpIHtcbiAgICAgICAgICAgIHN1Ym1pdEhhbmRsZXI/LihwYXlsb2FkLnRleHQpO1xuICAgICAgICB9XG4gICAgICAgIGVsc2UgaWYgKHBheWxvYWQ/LnR5cGUgPT09ICdib3VuZHMnICYmIHBheWxvYWQuYm91bmRzKSB7XG4gICAgICAgICAgICAvLyBUaGUgdXNlciBkcmFnZ2VkIHRoZSBvdmVybGF5IHRvIGEgbmV3IGRlc2t0b3Agc3BvdCDigJQgcmVtZW1iZXIgaXQuXG4gICAgICAgICAgICBzYXZlQm91bmRzKHBheWxvYWQuYm91bmRzKTtcbiAgICAgICAgfVxuICAgICAgICBlbHNlIGlmIChwYXlsb2FkPy50eXBlID09PSAnc2NhbGUnICYmIHR5cGVvZiBwYXlsb2FkLnNjYWxlID09PSAnbnVtYmVyJykge1xuICAgICAgICAgICAgLy8gVGhlIHVzZXIgcmVzaXplZCB0aGUgcG9wcGVkLW91dCBwZXQgKEFsdCt3aGVlbCkg4oCUIHBlcnNpc3QgaXQgdGhyb3VnaFxuICAgICAgICAgICAgLy8gdGhlIG1haW4gcmVuZGVyZXIncyBnYXRld2F5OyB0aGUgbmV3IHNjYWxlIHJpZGVzICRwZXRJbmZvIGJhY2sgdG8gdGhlXG4gICAgICAgICAgICAvLyBvdmVybGF5IG9uIHRoZSBuZXh0IHB1c2gsIGtlZXBpbmcgYm90aCBzdXJmYWNlcyBpbiBzeW5jLlxuICAgICAgICAgICAgc2NhbGVIYW5kbGVyPy4ocGF5bG9hZC5zY2FsZSk7XG4gICAgICAgIH1cbiAgICAgICAgZWxzZSBpZiAocGF5bG9hZD8udHlwZSA9PT0gJ29wZW4tYXBwJykge1xuICAgICAgICAgICAgLy8gTWFpbCBpY29uOiBzdXJmYWNlIHRoZSBhcHAgb24gdGhlIG1vc3QgcmVjZW50IHRocmVhZCAobWFpbi50cyBhbHJlYWR5XG4gICAgICAgICAgICAvLyBmb2N1c2VkIHRoZSB3aW5kb3cgYmVmb3JlIGZvcndhcmRpbmcgdGhpcykgYW5kIG1hcmsgaXQgcmVhZC5cbiAgICAgICAgICAgIGNsZWFyUGV0VW5yZWFkKCk7XG4gICAgICAgICAgICBvcGVuQXBwSGFuZGxlcj8uKCk7XG4gICAgICAgIH1cbiAgICB9KTtcbiAgICByZXR1cm4gKCkgPT4ge1xuICAgICAgICBjb250cm9sVW5zdWI/LigpO1xuICAgICAgICBjb250cm9sVW5zdWIgPSBudWxsO1xuICAgIH07XG59XG4iXX0=

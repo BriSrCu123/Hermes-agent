@@ -1,0 +1,285 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/components/pet/pet-sprite.js");const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"];const memo = __vite__cjsImport1_react["memo"]; const useEffect = __vite__cjsImport1_react["useEffect"]; const useMemo = __vite__cjsImport1_react["useMemo"]; const useRef = __vite__cjsImport1_react["useRef"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import __vite__cjsImport1_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { $petState } from "/src/store/pet.js";
+var _s = $RefreshSig$();
+const DEFAULT_FRAME_W = 192;
+const DEFAULT_FRAME_H = 208;
+const DEFAULT_FRAMES = 6;
+const DEFAULT_LOOP_MS = 1100;
+// Mirrors agent.pet.constants.DEFAULT_SCALE — fallback only; the gateway sends
+// the configured scale.
+const DEFAULT_SCALE = .33;
+// Mirrors agent.pet.constants.CODEX_STATE_ROWS (Petdex current taxonomy).
+export const DEFAULT_STATE_ROWS = [
+	"idle",
+	"running-right",
+	"running-left",
+	"waving",
+	"jumping",
+	"failed",
+	"waiting",
+	"running",
+	"review"
+];
+const STATE_ALIASES = {
+	idle: ["idle"],
+	wave: ["wave", "waving"],
+	jump: ["jump", "jumping"],
+	run: ["run", "running"],
+	failed: ["failed"],
+	review: ["review"],
+	waiting: ["waiting"]
+};
+const ROW_TO_STATE = {
+	idle: "idle",
+	wave: "wave",
+	waving: "wave",
+	jump: "jump",
+	jumping: "jump",
+	run: "run",
+	running: "run",
+	"running-right": "run",
+	"running-left": "run",
+	failed: "failed",
+	review: "review",
+	waiting: "waiting"
+};
+/**
+* Pick the running row + mirror for a horizontal travel direction.
+*
+* Codex sheets ship dedicated `running-left` / `running-right` locomotion rows
+* (already facing their way → no flip). Pets without them fall back to the
+* in-place `running`/`run` row, which faces left by convention, so rightward
+* travel is mirrored. Returns no `row` in that fallback case so the caller lets
+* `$petState` resolve it (and applies `mirror`).
+*/
+export function roamWalkRow(dir, stateRows) {
+	if (dir === 0) {
+		return { mirror: false };
+	}
+	const rows = stateRows ?? DEFAULT_STATE_ROWS;
+	const hasLeft = rows.includes("running-left");
+	const hasRight = rows.includes("running-right");
+	if (dir > 0) {
+		if (hasRight) {
+			return {
+				mirror: false,
+				row: "running-right"
+			};
+		}
+		if (hasLeft) {
+			return {
+				mirror: true,
+				row: "running-left"
+			};
+		}
+		return { mirror: true };
+	}
+	if (hasLeft) {
+		return {
+			mirror: false,
+			row: "running-left"
+		};
+	}
+	if (hasRight) {
+		return {
+			mirror: true,
+			row: "running-right"
+		};
+	}
+	return { mirror: false };
+}
+/**
+* Canvas renderer for a petdex spritesheet — the one piece that must be
+* TypeScript (the engine's decode/encode is Python). Draws the row matching the
+* live `$petState`, stepping `framesPerState` frames across a `loopMs` loop.
+*
+* State is read from `$petState` via a ref + subscription rather than a prop,
+* so the frequent activity-driven state changes during an agent turn update the
+* canvas (inside its RAF loop) WITHOUT triggering a React re-render. Combined
+* with `memo`, this component effectively never re-renders after mount until
+* the pet itself changes.
+*/
+function PetSpriteImpl({ info, zoom = 1, stateOverride, rowOverride }) {
+	_s();
+	const canvasRef = useRef(null);
+	const stateRef = useRef($petState.get());
+	const overrideRef = useRef(stateOverride);
+	const rowOverrideRef = useRef(rowOverride);
+	// Keep the override current without re-running the RAF setup effect.
+	useEffect(() => {
+		overrideRef.current = stateOverride;
+	}, [stateOverride]);
+	useEffect(() => {
+		rowOverrideRef.current = rowOverride;
+	}, [rowOverride]);
+	const frameW = info.frameW ?? DEFAULT_FRAME_W;
+	const frameH = info.frameH ?? DEFAULT_FRAME_H;
+	const frames = info.framesPerState ?? DEFAULT_FRAMES;
+	const framesByState = info.framesByState;
+	const framesByRow = info.framesByRow;
+	const loopMs = info.loopMs ?? DEFAULT_LOOP_MS;
+	const scale = (info.scale ?? DEFAULT_SCALE) * zoom;
+	const rows = info.stateRows ?? DEFAULT_STATE_ROWS;
+	const drawW = Math.round(frameW * scale);
+	const drawH = Math.round(frameH * scale);
+	const image = useMemo(() => {
+		if (!info.spritesheetBase64) {
+			return null;
+		}
+		const img = new Image();
+		img.src = `data:${info.mime ?? "image/webp"};base64,${info.spritesheetBase64}`;
+		return img;
+	}, [info.spritesheetBase64, info.mime]);
+	useEffect(() => {
+		const canvas = canvasRef.current;
+		if (!canvas || !image) {
+			return;
+		}
+		// willReadFrequently: the pop-out overlay samples this canvas's alpha under
+		// the cursor (per-pixel click-through), so opt into the CPU-readback path.
+		const ctx = canvas.getContext("2d", { willReadFrequently: true });
+		if (!ctx) {
+			return;
+		}
+		// Track state via subscription, not a prop — no re-render on activity ticks.
+		stateRef.current = $petState.get();
+		const unsubState = $petState.listen((next) => {
+			stateRef.current = next;
+		});
+		let raf = 0;
+		let frame = 0;
+		let lastStep = performance.now();
+		let drawnFrame = -1;
+		let drawnRow = -1;
+		let activeRow = -1;
+		let activeCount = -1;
+		const rowIndexForState = (s) => {
+			for (const key of STATE_ALIASES[s] ?? [s]) {
+				const idx = rows.indexOf(key);
+				if (idx >= 0) {
+					return idx;
+				}
+			}
+			return 0;
+		};
+		// Resolve a state to the row it draws and its real frame count. A state
+		// with no real frames (ragged sheet, empty row) falls back to idle rather
+		// than flashing blank padding.
+		const resolve = (s) => {
+			const real = framesByState?.[s] ?? frames;
+			if (real > 0) {
+				return {
+					row: rowIndexForState(s),
+					count: real
+				};
+			}
+			return {
+				row: rowIndexForState("idle"),
+				count: Math.max(1, framesByState?.idle ?? frames)
+			};
+		};
+		const resolveRow = (rowName) => {
+			const row = rows.indexOf(rowName);
+			const state = ROW_TO_STATE[rowName];
+			const count = Math.max(1, framesByRow?.[rowName] ?? framesByState?.[rowName] ?? (state ? framesByState?.[state] : 0) ?? frames);
+			return {
+				row: row >= 0 ? row : rowIndexForState(state ?? "idle"),
+				count
+			};
+		};
+		const render = (now) => {
+			const forcedRow = rowOverrideRef.current;
+			const { row, count } = forcedRow ? resolveRow(forcedRow) : resolve(overrideRef.current ?? stateRef.current);
+			if (row !== activeRow || count !== activeCount) {
+				activeRow = row;
+				activeCount = count;
+				frame = 0;
+				lastStep = now;
+				drawnFrame = -1;
+			}
+			// Per-state step keeps every state's loop ~loopMs even when frame counts
+			// differ; counts vary per row so derive the cadence here, not once.
+			const stepMs = loopMs / count;
+			if (now - lastStep >= stepMs) {
+				frame += 1;
+				lastStep = now;
+			}
+			frame %= count;
+			// Only touch the canvas when the visible cell actually changes. The RAF
+			// ticks at ~60Hz but the sprite only steps ~5Hz, so this skips ~90% of
+			// the clear+draw work and keeps the main thread free.
+			if ((frame !== drawnFrame || row !== drawnRow) && image.complete && image.naturalWidth > 0) {
+				const sx = frame * frameW;
+				const sy = row * frameH;
+				ctx.clearRect(0, 0, canvas.width, canvas.height);
+				ctx.imageSmoothingEnabled = false;
+				ctx.drawImage(image, sx, sy, frameW, frameH, 0, 0, drawW, drawH);
+				drawnFrame = frame;
+				drawnRow = row;
+			}
+			raf = requestAnimationFrame(render);
+		};
+		raf = requestAnimationFrame(render);
+		return () => {
+			cancelAnimationFrame(raf);
+			unsubState();
+		};
+	}, [
+		image,
+		frameW,
+		frameH,
+		frames,
+		framesByState,
+		framesByRow,
+		loopMs,
+		drawW,
+		drawH,
+		rows
+	]);
+	return _jsx("canvas", {
+		"aria-label": info.displayName ? `${info.displayName} pet` : "pet",
+		height: drawH,
+		ref: canvasRef,
+		style: {
+			height: drawH,
+			width: drawW
+		},
+		width: drawW
+	});
+}
+_s(PetSpriteImpl, "648eKOoSjPX21CjFjejkGJo84T4=");
+_c = PetSpriteImpl;
+/**
+* Memoized so a parent re-render (e.g. a position commit on drag-end) doesn't
+* re-run the canvas setup. Props change only when the pet itself changes.
+*/
+export const PetSprite = memo(PetSpriteImpl);
+_c2 = PetSprite;
+var _c, _c2;
+$RefreshReg$(_c, "PetSpriteImpl");
+$RefreshReg$(_c2, "PetSprite");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/components/pet/pet-sprite.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/pet/pet-sprite.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/pet/pet-sprite.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/pet/pet-sprite.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,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QU07RUFBRyxPQUFPO0NBQU0sQ0FBQztBQUN0TDs7Ozs7OztBQUtBLE9BQU8sTUFBTSxZQUFZLEtBQUssYUFBYSIsIm5hbWVzIjpbXSwic291cmNlcyI6WyJwZXQtc3ByaXRlLmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGpzeCBhcyBfanN4IH0gZnJvbSBcInJlYWN0L2pzeC1ydW50aW1lXCI7XG5pbXBvcnQgeyBtZW1vLCB1c2VFZmZlY3QsIHVzZU1lbW8sIHVzZVJlZiB9IGZyb20gJ3JlYWN0JztcbmltcG9ydCB7ICRwZXRTdGF0ZSB9IGZyb20gJ0Avc3RvcmUvcGV0JztcbmNvbnN0IERFRkFVTFRfRlJBTUVfVyA9IDE5MjtcbmNvbnN0IERFRkFVTFRfRlJBTUVfSCA9IDIwODtcbmNvbnN0IERFRkFVTFRfRlJBTUVTID0gNjtcbmNvbnN0IERFRkFVTFRfTE9PUF9NUyA9IDExMDA7XG4vLyBNaXJyb3JzIGFnZW50LnBldC5jb25zdGFudHMuREVGQVVMVF9TQ0FMRSDigJQgZmFsbGJhY2sgb25seTsgdGhlIGdhdGV3YXkgc2VuZHNcbi8vIHRoZSBjb25maWd1cmVkIHNjYWxlLlxuY29uc3QgREVGQVVMVF9TQ0FMRSA9IDAuMzM7XG4vLyBNaXJyb3JzIGFnZW50LnBldC5jb25zdGFudHMuQ09ERVhfU1RBVEVfUk9XUyAoUGV0ZGV4IGN1cnJlbnQgdGF4b25vbXkpLlxuZXhwb3J0IGNvbnN0IERFRkFVTFRfU1RBVEVfUk9XUyA9IFtcbiAgICAnaWRsZScsXG4gICAgJ3J1bm5pbmctcmlnaHQnLFxuICAgICdydW5uaW5nLWxlZnQnLFxuICAgICd3YXZpbmcnLFxuICAgICdqdW1waW5nJyxcbiAgICAnZmFpbGVkJyxcbiAgICAnd2FpdGluZycsXG4gICAgJ3J1bm5pbmcnLFxuICAgICdyZXZpZXcnXG5dO1xuY29uc3QgU1RBVEVfQUxJQVNFUyA9IHtcbiAgICBpZGxlOiBbJ2lkbGUnXSxcbiAgICB3YXZlOiBbJ3dhdmUnLCAnd2F2aW5nJ10sXG4gICAganVtcDogWydqdW1wJywgJ2p1bXBpbmcnXSxcbiAgICBydW46IFsncnVuJywgJ3J1bm5pbmcnXSxcbiAgICBmYWlsZWQ6IFsnZmFpbGVkJ10sXG4gICAgcmV2aWV3OiBbJ3JldmlldyddLFxuICAgIHdhaXRpbmc6IFsnd2FpdGluZyddXG59O1xuY29uc3QgUk9XX1RPX1NUQVRFID0ge1xuICAgIGlkbGU6ICdpZGxlJyxcbiAgICB3YXZlOiAnd2F2ZScsXG4gICAgd2F2aW5nOiAnd2F2ZScsXG4gICAganVtcDogJ2p1bXAnLFxuICAgIGp1bXBpbmc6ICdqdW1wJyxcbiAgICBydW46ICdydW4nLFxuICAgIHJ1bm5pbmc6ICdydW4nLFxuICAgICdydW5uaW5nLXJpZ2h0JzogJ3J1bicsXG4gICAgJ3J1bm5pbmctbGVmdCc6ICdydW4nLFxuICAgIGZhaWxlZDogJ2ZhaWxlZCcsXG4gICAgcmV2aWV3OiAncmV2aWV3JyxcbiAgICB3YWl0aW5nOiAnd2FpdGluZydcbn07XG4vKipcbiAqIFBpY2sgdGhlIHJ1bm5pbmcgcm93ICsgbWlycm9yIGZvciBhIGhvcml6b250YWwgdHJhdmVsIGRpcmVjdGlvbi5cbiAqXG4gKiBDb2RleCBzaGVldHMgc2hpcCBkZWRpY2F0ZWQgYHJ1bm5pbmctbGVmdGAgLyBgcnVubmluZy1yaWdodGAgbG9jb21vdGlvbiByb3dzXG4gKiAoYWxyZWFkeSBmYWNpbmcgdGhlaXIgd2F5IOKGkiBubyBmbGlwKS4gUGV0cyB3aXRob3V0IHRoZW0gZmFsbCBiYWNrIHRvIHRoZVxuICogaW4tcGxhY2UgYHJ1bm5pbmdgL2BydW5gIHJvdywgd2hpY2ggZmFjZXMgbGVmdCBieSBjb252ZW50aW9uLCBzbyByaWdodHdhcmRcbiAqIHRyYXZlbCBpcyBtaXJyb3JlZC4gUmV0dXJucyBubyBgcm93YCBpbiB0aGF0IGZhbGxiYWNrIGNhc2Ugc28gdGhlIGNhbGxlciBsZXRzXG4gKiBgJHBldFN0YXRlYCByZXNvbHZlIGl0IChhbmQgYXBwbGllcyBgbWlycm9yYCkuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiByb2FtV2Fsa1JvdyhkaXIsIHN0YXRlUm93cykge1xuICAgIGlmIChkaXIgPT09IDApIHtcbiAgICAgICAgcmV0dXJuIHsgbWlycm9yOiBmYWxzZSB9O1xuICAgIH1cbiAgICBjb25zdCByb3dzID0gc3RhdGVSb3dzID8/IERFRkFVTFRfU1RBVEVfUk9XUztcbiAgICBjb25zdCBoYXNMZWZ0ID0gcm93cy5pbmNsdWRlcygncnVubmluZy1sZWZ0Jyk7XG4gICAgY29uc3QgaGFzUmlnaHQgPSByb3dzLmluY2x1ZGVzKCdydW5uaW5nLXJpZ2h0Jyk7XG4gICAgaWYgKGRpciA+IDApIHtcbiAgICAgICAgaWYgKGhhc1JpZ2h0KSB7XG4gICAgICAgICAgICByZXR1cm4geyBtaXJyb3I6IGZhbHNlLCByb3c6ICdydW5uaW5nLXJpZ2h0JyB9O1xuICAgICAgICB9XG4gICAgICAgIGlmIChoYXNMZWZ0KSB7XG4gICAgICAgICAgICByZXR1cm4geyBtaXJyb3I6IHRydWUsIHJvdzogJ3J1bm5pbmctbGVmdCcgfTtcbiAgICAgICAgfVxuICAgICAgICByZXR1cm4geyBtaXJyb3I6IHRydWUgfTtcbiAgICB9XG4gICAgaWYgKGhhc0xlZnQpIHtcbiAgICAgICAgcmV0dXJuIHsgbWlycm9yOiBmYWxzZSwgcm93OiAncnVubmluZy1sZWZ0JyB9O1xuICAgIH1cbiAgICBpZiAoaGFzUmlnaHQpIHtcbiAgICAgICAgcmV0dXJuIHsgbWlycm9yOiB0cnVlLCByb3c6ICdydW5uaW5nLXJpZ2h0JyB9O1xuICAgIH1cbiAgICByZXR1cm4geyBtaXJyb3I6IGZhbHNlIH07XG59XG4vKipcbiAqIENhbnZhcyByZW5kZXJlciBmb3IgYSBwZXRkZXggc3ByaXRlc2hlZXQg4oCUIHRoZSBvbmUgcGllY2UgdGhhdCBtdXN0IGJlXG4gKiBUeXBlU2NyaXB0ICh0aGUgZW5naW5lJ3MgZGVjb2RlL2VuY29kZSBpcyBQeXRob24pLiBEcmF3cyB0aGUgcm93IG1hdGNoaW5nIHRoZVxuICogbGl2ZSBgJHBldFN0YXRlYCwgc3RlcHBpbmcgYGZyYW1lc1BlclN0YXRlYCBmcmFtZXMgYWNyb3NzIGEgYGxvb3BNc2AgbG9vcC5cbiAqXG4gKiBTdGF0ZSBpcyByZWFkIGZyb20gYCRwZXRTdGF0ZWAgdmlhIGEgcmVmICsgc3Vic2NyaXB0aW9uIHJhdGhlciB0aGFuIGEgcHJvcCxcbiAqIHNvIHRoZSBmcmVxdWVudCBhY3Rpdml0eS1kcml2ZW4gc3RhdGUgY2hhbmdlcyBkdXJpbmcgYW4gYWdlbnQgdHVybiB1cGRhdGUgdGhlXG4gKiBjYW52YXMgKGluc2lkZSBpdHMgUkFGIGxvb3ApIFdJVEhPVVQgdHJpZ2dlcmluZyBhIFJlYWN0IHJlLXJlbmRlci4gQ29tYmluZWRcbiAqIHdpdGggYG1lbW9gLCB0aGlzIGNvbXBvbmVudCBlZmZlY3RpdmVseSBuZXZlciByZS1yZW5kZXJzIGFmdGVyIG1vdW50IHVudGlsXG4gKiB0aGUgcGV0IGl0c2VsZiBjaGFuZ2VzLlxuICovXG5mdW5jdGlvbiBQZXRTcHJpdGVJbXBsKHsgaW5mbywgem9vbSA9IDEsIHN0YXRlT3ZlcnJpZGUsIHJvd092ZXJyaWRlIH0pIHtcbiAgICBjb25zdCBjYW52YXNSZWYgPSB1c2VSZWYobnVsbCk7XG4gICAgY29uc3Qgc3RhdGVSZWYgPSB1c2VSZWYoJHBldFN0YXRlLmdldCgpKTtcbiAgICBjb25zdCBvdmVycmlkZVJlZiA9IHVzZVJlZihzdGF0ZU92ZXJyaWRlKTtcbiAgICBjb25zdCByb3dPdmVycmlkZVJlZiA9IHVzZVJlZihyb3dPdmVycmlkZSk7XG4gICAgLy8gS2VlcCB0aGUgb3ZlcnJpZGUgY3VycmVudCB3aXRob3V0IHJlLXJ1bm5pbmcgdGhlIFJBRiBzZXR1cCBlZmZlY3QuXG4gICAgdXNlRWZmZWN0KCgpID0+IHtcbiAgICAgICAgb3ZlcnJpZGVSZWYuY3VycmVudCA9IHN0YXRlT3ZlcnJpZGU7XG4gICAgfSwgW3N0YXRlT3ZlcnJpZGVdKTtcbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgICByb3dPdmVycmlkZVJlZi5jdXJyZW50ID0gcm93T3ZlcnJpZGU7XG4gICAgfSwgW3Jvd092ZXJyaWRlXSk7XG4gICAgY29uc3QgZnJhbWVXID0gaW5mby5mcmFtZVcgPz8gREVGQVVMVF9GUkFNRV9XO1xuICAgIGNvbnN0IGZyYW1lSCA9IGluZm8uZnJhbWVIID8/IERFRkFVTFRfRlJBTUVfSDtcbiAgICBjb25zdCBmcmFtZXMgPSBpbmZvLmZyYW1lc1BlclN0YXRlID8/IERFRkFVTFRfRlJBTUVTO1xuICAgIGNvbnN0IGZyYW1lc0J5U3RhdGUgPSBpbmZvLmZyYW1lc0J5U3RhdGU7XG4gICAgY29uc3QgZnJhbWVzQnlSb3cgPSBpbmZvLmZyYW1lc0J5Um93O1xuICAgIGNvbnN0IGxvb3BNcyA9IGluZm8ubG9vcE1zID8/IERFRkFVTFRfTE9PUF9NUztcbiAgICBjb25zdCBzY2FsZSA9IChpbmZvLnNjYWxlID8/IERFRkFVTFRfU0NBTEUpICogem9vbTtcbiAgICBjb25zdCByb3dzID0gaW5mby5zdGF0ZVJvd3MgPz8gREVGQVVMVF9TVEFURV9ST1dTO1xuICAgIGNvbnN0IGRyYXdXID0gTWF0aC5yb3VuZChmcmFtZVcgKiBzY2FsZSk7XG4gICAgY29uc3QgZHJhd0ggPSBNYXRoLnJvdW5kKGZyYW1lSCAqIHNjYWxlKTtcbiAgICBjb25zdCBpbWFnZSA9IHVzZU1lbW8oKCkgPT4ge1xuICAgICAgICBpZiAoIWluZm8uc3ByaXRlc2hlZXRCYXNlNjQpIHtcbiAgICAgICAgICAgIHJldHVybiBudWxsO1xuICAgICAgICB9XG4gICAgICAgIGNvbnN0IGltZyA9IG5ldyBJbWFnZSgpO1xuICAgICAgICBpbWcuc3JjID0gYGRhdGE6JHtpbmZvLm1pbWUgPz8gJ2ltYWdlL3dlYnAnfTtiYXNlNjQsJHtpbmZvLnNwcml0ZXNoZWV0QmFzZTY0fWA7XG4gICAgICAgIHJldHVybiBpbWc7XG4gICAgfSwgW2luZm8uc3ByaXRlc2hlZXRCYXNlNjQsIGluZm8ubWltZV0pO1xuICAgIHVzZUVmZmVjdCgoKSA9PiB7XG4gICAgICAgIGNvbnN0IGNhbnZhcyA9IGNhbnZhc1JlZi5jdXJyZW50O1xuICAgICAgICBpZiAoIWNhbnZhcyB8fCAhaW1hZ2UpIHtcbiAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgfVxuICAgICAgICAvLyB3aWxsUmVhZEZyZXF1ZW50bHk6IHRoZSBwb3Atb3V0IG92ZXJsYXkgc2FtcGxlcyB0aGlzIGNhbnZhcydzIGFscGhhIHVuZGVyXG4gICAgICAgIC8vIHRoZSBjdXJzb3IgKHBlci1waXhlbCBjbGljay10aHJvdWdoKSwgc28gb3B0IGludG8gdGhlIENQVS1yZWFkYmFjayBwYXRoLlxuICAgICAgICBjb25zdCBjdHggPSBjYW52YXMuZ2V0Q29udGV4dCgnMmQnLCB7IHdpbGxSZWFkRnJlcXVlbnRseTogdHJ1ZSB9KTtcbiAgICAgICAgaWYgKCFjdHgpIHtcbiAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgfVxuICAgICAgICAvLyBUcmFjayBzdGF0ZSB2aWEgc3Vic2NyaXB0aW9uLCBub3QgYSBwcm9wIOKAlCBubyByZS1yZW5kZXIgb24gYWN0aXZpdHkgdGlja3MuXG4gICAgICAgIHN0YXRlUmVmLmN1cnJlbnQgPSAkcGV0U3RhdGUuZ2V0KCk7XG4gICAgICAgIGNvbnN0IHVuc3ViU3RhdGUgPSAkcGV0U3RhdGUubGlzdGVuKG5leHQgPT4ge1xuICAgICAgICAgICAgc3RhdGVSZWYuY3VycmVudCA9IG5leHQ7XG4gICAgICAgIH0pO1xuICAgICAgICBsZXQgcmFmID0gMDtcbiAgICAgICAgbGV0IGZyYW1lID0gMDtcbiAgICAgICAgbGV0IGxhc3RTdGVwID0gcGVyZm9ybWFuY2Uubm93KCk7XG4gICAgICAgIGxldCBkcmF3bkZyYW1lID0gLTE7XG4gICAgICAgIGxldCBkcmF3blJvdyA9IC0xO1xuICAgICAgICBsZXQgYWN0aXZlUm93ID0gLTE7XG4gICAgICAgIGxldCBhY3RpdmVDb3VudCA9IC0xO1xuICAgICAgICBjb25zdCByb3dJbmRleEZvclN0YXRlID0gKHMpID0+IHtcbiAgICAgICAgICAgIGZvciAoY29uc3Qga2V5IG9mIFNUQVRFX0FMSUFTRVNbc10gPz8gW3NdKSB7XG4gICAgICAgICAgICAgICAgY29uc3QgaWR4ID0gcm93cy5pbmRleE9mKGtleSk7XG4gICAgICAgICAgICAgICAgaWYgKGlkeCA+PSAwKSB7XG4gICAgICAgICAgICAgICAgICAgIHJldHVybiBpZHg7XG4gICAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgfVxuICAgICAgICAgICAgcmV0dXJuIDA7XG4gICAgICAgIH07XG4gICAgICAgIC8vIFJlc29sdmUgYSBzdGF0ZSB0byB0aGUgcm93IGl0IGRyYXdzIGFuZCBpdHMgcmVhbCBmcmFtZSBjb3VudC4gQSBzdGF0ZVxuICAgICAgICAvLyB3aXRoIG5vIHJlYWwgZnJhbWVzIChyYWdnZWQgc2hlZXQsIGVtcHR5IHJvdykgZmFsbHMgYmFjayB0byBpZGxlIHJhdGhlclxuICAgICAgICAvLyB0aGFuIGZsYXNoaW5nIGJsYW5rIHBhZGRpbmcuXG4gICAgICAgIGNvbnN0IHJlc29sdmUgPSAocykgPT4ge1xuICAgICAgICAgICAgY29uc3QgcmVhbCA9IGZyYW1lc0J5U3RhdGU/LltzXSA/PyBmcmFtZXM7XG4gICAgICAgICAgICBpZiAocmVhbCA+IDApIHtcbiAgICAgICAgICAgICAgICByZXR1cm4geyByb3c6IHJvd0luZGV4Rm9yU3RhdGUocyksIGNvdW50OiByZWFsIH07XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICByZXR1cm4geyByb3c6IHJvd0luZGV4Rm9yU3RhdGUoJ2lkbGUnKSwgY291bnQ6IE1hdGgubWF4KDEsIGZyYW1lc0J5U3RhdGU/LmlkbGUgPz8gZnJhbWVzKSB9O1xuICAgICAgICB9O1xuICAgICAgICBjb25zdCByZXNvbHZlUm93ID0gKHJvd05hbWUpID0+IHtcbiAgICAgICAgICAgIGNvbnN0IHJvdyA9IHJvd3MuaW5kZXhPZihyb3dOYW1lKTtcbiAgICAgICAgICAgIGNvbnN0IHN0YXRlID0gUk9XX1RPX1NUQVRFW3Jvd05hbWVdO1xuICAgICAgICAgICAgY29uc3QgY291bnQgPSBNYXRoLm1heCgxLCBmcmFtZXNCeVJvdz8uW3Jvd05hbWVdID8/IGZyYW1lc0J5U3RhdGU/Lltyb3dOYW1lXSA/PyAoc3RhdGUgPyBmcmFtZXNCeVN0YXRlPy5bc3RhdGVdIDogMCkgPz8gZnJhbWVzKTtcbiAgICAgICAgICAgIHJldHVybiB7IHJvdzogcm93ID49IDAgPyByb3cgOiByb3dJbmRleEZvclN0YXRlKHN0YXRlID8/ICdpZGxlJyksIGNvdW50IH07XG4gICAgICAgIH07XG4gICAgICAgIGNvbnN0IHJlbmRlciA9IChub3cpID0+IHtcbiAgICAgICAgICAgIGNvbnN0IGZvcmNlZFJvdyA9IHJvd092ZXJyaWRlUmVmLmN1cnJlbnQ7XG4gICAgICAgICAgICBjb25zdCB7IHJvdywgY291bnQgfSA9IGZvcmNlZFJvdyA/IHJlc29sdmVSb3coZm9yY2VkUm93KSA6IHJlc29sdmUob3ZlcnJpZGVSZWYuY3VycmVudCA/PyBzdGF0ZVJlZi5jdXJyZW50KTtcbiAgICAgICAgICAgIGlmIChyb3cgIT09IGFjdGl2ZVJvdyB8fCBjb3VudCAhPT0gYWN0aXZlQ291bnQpIHtcbiAgICAgICAgICAgICAgICBhY3RpdmVSb3cgPSByb3c7XG4gICAgICAgICAgICAgICAgYWN0aXZlQ291bnQgPSBjb3VudDtcbiAgICAgICAgICAgICAgICBmcmFtZSA9IDA7XG4gICAgICAgICAgICAgICAgbGFzdFN0ZXAgPSBub3c7XG4gICAgICAgICAgICAgICAgZHJhd25GcmFtZSA9IC0xO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgLy8gUGVyLXN0YXRlIHN0ZXAga2VlcHMgZXZlcnkgc3RhdGUncyBsb29wIH5sb29wTXMgZXZlbiB3aGVuIGZyYW1lIGNvdW50c1xuICAgICAgICAgICAgLy8gZGlmZmVyOyBjb3VudHMgdmFyeSBwZXIgcm93IHNvIGRlcml2ZSB0aGUgY2FkZW5jZSBoZXJlLCBub3Qgb25jZS5cbiAgICAgICAgICAgIGNvbnN0IHN0ZXBNcyA9IGxvb3BNcyAvIGNvdW50O1xuICAgICAgICAgICAgaWYgKG5vdyAtIGxhc3RTdGVwID49IHN0ZXBNcykge1xuICAgICAgICAgICAgICAgIGZyYW1lICs9IDE7XG4gICAgICAgICAgICAgICAgbGFzdFN0ZXAgPSBub3c7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICBmcmFtZSAlPSBjb3VudDtcbiAgICAgICAgICAgIC8vIE9ubHkgdG91Y2ggdGhlIGNhbnZhcyB3aGVuIHRoZSB2aXNpYmxlIGNlbGwgYWN0dWFsbHkgY2hhbmdlcy4gVGhlIFJBRlxuICAgICAgICAgICAgLy8gdGlja3MgYXQgfjYwSHogYnV0IHRoZSBzcHJpdGUgb25seSBzdGVwcyB+NUh6LCBzbyB0aGlzIHNraXBzIH45MCUgb2ZcbiAgICAgICAgICAgIC8vIHRoZSBjbGVhcitkcmF3IHdvcmsgYW5kIGtlZXBzIHRoZSBtYWluIHRocmVhZCBmcmVlLlxuICAgICAgICAgICAgaWYgKChmcmFtZSAhPT0gZHJhd25GcmFtZSB8fCByb3cgIT09IGRyYXduUm93KSAmJiBpbWFnZS5jb21wbGV0ZSAmJiBpbWFnZS5uYXR1cmFsV2lkdGggPiAwKSB7XG4gICAgICAgICAgICAgICAgY29uc3Qgc3ggPSBmcmFtZSAqIGZyYW1lVztcbiAgICAgICAgICAgICAgICBjb25zdCBzeSA9IHJvdyAqIGZyYW1lSDtcbiAgICAgICAgICAgICAgICBjdHguY2xlYXJSZWN0KDAsIDAsIGNhbnZhcy53aWR0aCwgY2FudmFzLmhlaWdodCk7XG4gICAgICAgICAgICAgICAgY3R4LmltYWdlU21vb3RoaW5nRW5hYmxlZCA9IGZhbHNlO1xuICAgICAgICAgICAgICAgIGN0eC5kcmF3SW1hZ2UoaW1hZ2UsIHN4LCBzeSwgZnJhbWVXLCBmcmFtZUgsIDAsIDAsIGRyYXdXLCBkcmF3SCk7XG4gICAgICAgICAgICAgICAgZHJhd25GcmFtZSA9IGZyYW1lO1xuICAgICAgICAgICAgICAgIGRyYXduUm93ID0gcm93O1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgcmFmID0gcmVxdWVzdEFuaW1hdGlvbkZyYW1lKHJlbmRlcik7XG4gICAgICAgIH07XG4gICAgICAgIHJhZiA9IHJlcXVlc3RBbmltYXRpb25GcmFtZShyZW5kZXIpO1xuICAgICAgICByZXR1cm4gKCkgPT4ge1xuICAgICAgICAgICAgY2FuY2VsQW5pbWF0aW9uRnJhbWUocmFmKTtcbiAgICAgICAgICAgIHVuc3ViU3RhdGUoKTtcbiAgICAgICAgfTtcbiAgICB9LCBbaW1hZ2UsIGZyYW1lVywgZnJhbWVILCBmcmFtZXMsIGZyYW1lc0J5U3RhdGUsIGZyYW1lc0J5Um93LCBsb29wTXMsIGRyYXdXLCBkcmF3SCwgcm93c10pO1xuICAgIHJldHVybiAoX2pzeChcImNhbnZhc1wiLCB7IFwiYXJpYS1sYWJlbFwiOiBpbmZvLmRpc3BsYXlOYW1lID8gYCR7aW5mby5kaXNwbGF5TmFtZX0gcGV0YCA6ICdwZXQnLCBoZWlnaHQ6IGRyYXdILCByZWY6IGNhbnZhc1JlZiwgc3R5bGU6IHsgaGVpZ2h0OiBkcmF3SCwgd2lkdGg6IGRyYXdXIH0sIHdpZHRoOiBkcmF3VyB9KSk7XG59XG4vKipcbiAqIE1lbW9pemVkIHNvIGEgcGFyZW50IHJlLXJlbmRlciAoZS5nLiBhIHBvc2l0aW9uIGNvbW1pdCBvbiBkcmFnLWVuZCkgZG9lc24ndFxuICogcmUtcnVuIHRoZSBjYW52YXMgc2V0dXAuIFByb3BzIGNoYW5nZSBvbmx5IHdoZW4gdGhlIHBldCBpdHNlbGYgY2hhbmdlcy5cbiAqL1xuZXhwb3J0IGNvbnN0IFBldFNwcml0ZSA9IG1lbW8oUGV0U3ByaXRlSW1wbCk7XG4iXX0=

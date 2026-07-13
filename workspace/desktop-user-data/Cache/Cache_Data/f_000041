@@ -1,0 +1,438 @@
+import { normalize } from "/src/lib/text.js";
+/** Path split into segments, ignoring trailing slashes and mixed separators. */
+const segments = (path) => path.replace(/[/\\]+$/, "").split(/[/\\]/).filter(Boolean);
+/** A path with trailing separators stripped, for stable equality checks. */
+const normalizePath = (path) => (path ?? "").replace(/[/\\]+$/, "");
+/** Last path segment. */
+export const baseName = (path) => segments(path).pop();
+// The `.worktrees` dir for a KANBAN-TASK worktree path, else null. Only matches
+// task worktrees (`<repo>/.worktrees/t_<hex>`, the `t_…` id kanban_db mints) so
+// the many ephemeral task worktrees collapse into one lane — while user-named
+// "New worktree" dirs (`<repo>/.worktrees/<slug>`) stay as their own lanes.
+const KANBAN_DIR_RE = /^(.*[/\\]\.worktrees)[/\\]t_[0-9a-f]+[/\\]?$/;
+export function kanbanWorktreeDir(path) {
+	return path.match(KANBAN_DIR_RE)?.[1] ?? null;
+}
+/** Label for a main-checkout lane whose session recorded no branch. */
+export const DEFAULT_BRANCH_LABEL = "main";
+/** The one definition of a main-checkout lane id (must match the backend tree). */
+export const branchLaneId = (repoRoot, branch) => `${repoRoot}::branch::${(branch ?? "").trim()}`;
+/** A session's recency stamp (last activity, falling back to creation). */
+export const sessionRecency = (session) => session.last_active || session.started_at || 0;
+/** Default-branch names that pin to the top and read as the repo's trunk. */
+const TRUNK_BRANCHES = new Set([
+	"main",
+	"master",
+	"trunk",
+	"develop"
+]);
+const isTrunkLane = (group) => Boolean(group.isMain) && TRUNK_BRANCHES.has(group.label.toLowerCase());
+/** A lane's recency = its most-recently-active session (empty lanes sink). */
+const laneActivity = (group) => group.sessions.reduce((max, session) => Math.max(max, sessionRecency(session)), 0);
+// Lane tiers (low sorts first): the repo's primary ("home") checkout pins above
+// everything (it's "where you are", labeled by its live branch), then trunk,
+// then ordinary branches/worktrees, then the kanban aggregate.
+const laneRank = (group) => group.isHome ? 0 : isTrunkLane(group) ? 1 : group.isKanban ? 3 : 2;
+/**
+* Sort by tier (home → trunk → branches/worktrees → kanban); within a tier, by
+* most-recent activity (empty lanes fall last), label as the tiebreak.
+*/
+function compareWorktreeGroups(a, b) {
+	const byRank = laneRank(a) - laneRank(b);
+	if (byRank !== 0) {
+		return byRank;
+	}
+	const byActivity = laneActivity(b) - laneActivity(a);
+	return byActivity || a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+}
+export function sortWorktreeGroups(groups) {
+	return [...groups].sort(compareWorktreeGroups);
+}
+/**
+* VISUAL enhancer only: inject empty lanes from a live `git worktree list` so a
+* repo shows its branches/worktrees even when they have no Hermes sessions yet.
+* The repo's real session lanes already come fully built from the backend
+* (`projects.project_sessions`); this never adds or moves session rows, and it
+* degrades to a no-op on remote backends (where the Electron probe returns
+* nothing). Lanes already present (by id/path) are left untouched.
+*/
+export function mergeRepoWorktreeGroups(repo, discoveredWorktrees) {
+	// Branch-primary labels: a linked worktree's identity in every git UI (VS
+	// Code, JetBrains, lazygit, …) is its CHECKED-OUT BRANCH, not the directory it
+	// happens to live in. The backend labels these lanes by dir/slug; relabel them
+	// to the live branch from `git worktree list` so the sidebar matches the
+	// composer's branch strip. Detached worktrees (no branch) keep their dir label.
+	const liveBranchByPath = new Map();
+	// Inverse: branch → its ONE live worktree path. git guarantees a branch is
+	// checked out in at most one worktree, so this mapping is a function and can
+	// re-anchor a lane whose stored path has drifted from git truth.
+	const livePathByBranch = new Map();
+	for (const worktree of discoveredWorktrees ?? []) {
+		const wtPath = normalizePath(worktree.path);
+		const branch = worktree.branch?.trim();
+		if (wtPath && branch && !worktree.detached) {
+			liveBranchByPath.set(wtPath, branch);
+			livePathByBranch.set(branch.toLowerCase(), worktree.path.trim());
+		}
+	}
+	// The primary ("home") checkout's LIVE branch. A repo dir is only ever on ONE
+	// branch, so every main-checkout session lane (historical branches over the
+	// same root path) collapses into a single home lane labeled by this live
+	// branch, defaulting to `main`. Known only when the local git probe ran;
+	// remote backends keep the backend's recorded-branch main lane untouched.
+	const mainWorktree = (discoveredWorktrees ?? []).find((w) => w.isMain);
+	const homeBranch = mainWorktree && !mainWorktree.detached ? mainWorktree.branch?.trim() || DEFAULT_BRANCH_LABEL : "";
+	// Reconcile a LINKED worktree lane against git truth so its label AND path
+	// describe the SAME worktree. Two repair directions:
+	//  1. Path git knows → relabel to that path's live branch (git UIs identify a
+	//     worktree by its checked-out branch, not the dir it lives in).
+	//  2. Path git DOESN'T know but the label IS a live branch → the lane's path
+	//     has gone stale; re-anchor it to that branch's real path, else "reveal"
+	//     opens a different, stale checkout. The home checkout is folded
+	//     separately (below), never here.
+	const reconcile = (group) => {
+		if (group.isMain || group.isKanban) {
+			return group;
+		}
+		const branchForPath = liveBranchByPath.get(normalizePath(group.path));
+		if (branchForPath) {
+			return branchForPath !== group.label ? {
+				...group,
+				label: branchForPath
+			} : group;
+		}
+		const livePath = livePathByBranch.get(normalize(group.label));
+		if (livePath && normalizePath(livePath) !== normalizePath(group.path)) {
+			return {
+				...group,
+				id: livePath,
+				path: livePath
+			};
+		}
+		return group;
+	};
+	const dedupeById = (sessions) => {
+		const byId = new Map();
+		for (const session of sessions) {
+			byId.set(session.id, byId.get(session.id) ?? session);
+		}
+		return [...byId.values()];
+	};
+	// Fold every main-checkout lane into one home lane labeled by the live branch
+	// (the root dir is only ever on one branch); reconcile the linked worktrees.
+	// Always shown, even with no sessions on the current branch yet. Remote
+	// backends (no probe → no homeBranch) keep their main lanes untouched.
+	const mainGroups = repo.groups.filter((group) => group.isMain);
+	const reconciled = repo.groups.filter((group) => !group.isMain).map(reconcile);
+	if (homeBranch) {
+		reconciled.push({
+			id: branchLaneId(repo.id, homeBranch),
+			label: homeBranch,
+			path: repo.path,
+			isMain: true,
+			isHome: true,
+			sessions: dedupeById(mainGroups.flatMap((group) => group.sessions))
+		});
+	} else {
+		reconciled.push(...mainGroups);
+	}
+	// Collapse any duplicate a re-anchor produced (a stale lane re-pointed onto a
+	// path a real lane already holds) — keep the richer (more sessions) lane.
+	const byPath = new Map();
+	const merged = [];
+	for (const group of reconciled) {
+		const key = !group.isMain && group.path ? normalizePath(group.path) : "";
+		const existing = key ? byPath.get(key) : undefined;
+		if (existing) {
+			if (group.sessions.length > existing.sessions.length) {
+				merged[merged.indexOf(existing)] = group;
+				byPath.set(key, group);
+			}
+			continue;
+		}
+		if (key) {
+			byPath.set(key, group);
+		}
+		merged.push(group);
+	}
+	const seenIds = new Set(merged.map((group) => group.id));
+	const seenPaths = new Set(merged.map((group) => group.path).filter((path) => Boolean(path)));
+	// Dedupe by branch label too: a branch shows once even if it's checked out in
+	// a linked worktree AND already has a session lane.
+	const seenLabels = new Set(merged.map((group) => group.label.toLowerCase()));
+	for (const worktree of discoveredWorktrees ?? []) {
+		const wtPath = worktree.path?.trim();
+		if (!wtPath) {
+			continue;
+		}
+		// The home checkout is already the collapsed home lane (above).
+		if (worktree.isMain && homeBranch) {
+			continue;
+		}
+		// Kanban task worktrees never get their own lane — they fold into the
+		// session-derived `::kanban` bucket. Listing every `git worktree list` entry
+		// here is exactly what blew the sidebar up to hundreds of empty rows.
+		if (!worktree.isMain && kanbanWorktreeDir(wtPath)) {
+			continue;
+		}
+		const label = (worktree.isMain ? worktree.branch?.trim() || DEFAULT_BRANCH_LABEL : worktree.branch?.trim()) || baseName(wtPath) || wtPath;
+		const id = worktree.isMain ? branchLaneId(repo.id, label) : wtPath;
+		const alreadySeen = seenIds.has(id) || seenLabels.has(label.toLowerCase()) || !worktree.isMain && seenPaths.has(wtPath);
+		if (alreadySeen) {
+			continue;
+		}
+		merged.push({
+			id,
+			isMain: worktree.isMain,
+			label,
+			path: wtPath,
+			sessions: []
+		});
+		seenIds.add(id);
+		seenPaths.add(wtPath);
+		seenLabels.add(label.toLowerCase());
+	}
+	return sortWorktreeGroups(merged);
+}
+// ── Live session overlay ─────────────────────────────────────────────────────
+// The backend tree is a snapshot (sessions with >=1 message, refreshed on a
+// turn boundary). For parity with the flat Recents list — instant insertion of
+// a freshly-created session and the live "working" arc — we overlay the live
+// `$sessions` store onto the tree at render time. This is ADDITIVE only: the
+// backend still owns membership, structure, counts, and history. The overlay
+// just places rows already present in `$sessions` into the project/lane the
+// backend would put them in, using the same id scheme. Worktree/kanban folding
+// needs the backend common-root probe, so those rows are left for the next
+// tree refresh; the common case (a new main-checkout session) overlays here.
+/** True when `target` equals `folder` or is nested under it (segment-wise). */
+function isPathUnder(folder, target) {
+	const f = segments(folder);
+	const t = segments(target);
+	if (!f.length || f.length > t.length) {
+		return false;
+	}
+	return f.every((seg, i) => seg === t[i]);
+}
+/**
+* The project a live session belongs to (overview membership) — explicit project
+* by longest-prefix folder, else the repo root (the auto-project id). An IN-TREE
+* linked worktree (`<repoRoot>/.worktrees/<slug>`) belongs to the SAME project as
+* its repo root (the root is right there in the path), so a freshly-created
+* worktree session — e.g. from "convert a branch" / "new worktree" — surfaces in
+* the overview at once instead of waiting for the next backend refresh. Returns
+* null only for sessions we genuinely can't place from the row alone: cwd-less,
+* kanban-task worktrees (they fold into the kanban bucket), or a worktree that
+* lives OUTSIDE the repo root (a sibling dir whose project can't be derived).
+*/
+export function liveSessionProjectId(session, explicitProjects) {
+	const cwd = (session.cwd || "").trim();
+	if (!cwd || kanbanWorktreeDir(cwd)) {
+		return null;
+	}
+	// No persisted repo root yet (brand-new session) → the cwd is the root.
+	const repoRoot = (session.git_repo_root || "").trim() || cwd;
+	const underRepo = cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`);
+	if (!underRepo) {
+		return null;
+	}
+	let projectId = "";
+	let bestLen = -1;
+	for (const project of explicitProjects) {
+		if (project.archived) {
+			continue;
+		}
+		for (const folder of project.folders) {
+			if (isPathUnder(folder.path, cwd) || isPathUnder(folder.path, repoRoot)) {
+				const len = segments(folder.path).length;
+				if (len > bestLen) {
+					bestLen = len;
+					projectId = project.id;
+				}
+			}
+		}
+	}
+	return projectId || repoRoot;
+}
+const upsertSession = (rows, session) => [session, ...rows.filter((row) => row.id !== session.id)].sort((a, b) => b.started_at - a.started_at);
+/**
+* The lane a live session belongs to WITHIN a known repo root, by path — the
+* entered project already knows its repo roots, so we don't need the session's
+* (often-unset, on a fresh row) git_repo_root. Mirrors the backend's lane ids:
+* main checkout -> branch lane, `.worktrees/t_<hex>` -> kanban, any other
+* `.worktrees/<slug>` -> that worktree's own lane.
+*/
+function liveLaneForRepo(repoRoot, session) {
+	const cwd = (session.cwd || "").trim();
+	if (!cwd || !isPathUnder(repoRoot, cwd)) {
+		return null;
+	}
+	const wt = cwd.match(/^(.*[/\\]\.worktrees)[/\\]([^/\\]+)/);
+	if (wt) {
+		const [worktreeRoot, worktreesDir, slug] = [
+			wt[0],
+			wt[1],
+			wt[2]
+		];
+		return /^t_[0-9a-f]+$/.test(slug) ? {
+			id: `${repoRoot}::kanban`,
+			isKanban: true,
+			isMain: false,
+			label: "kanban",
+			path: worktreesDir,
+			sessions: []
+		} : {
+			id: worktreeRoot,
+			isMain: false,
+			label: slug,
+			path: worktreeRoot,
+			sessions: []
+		};
+	}
+	const branch = (session.git_branch || "").trim() || DEFAULT_BRANCH_LABEL;
+	return {
+		id: branchLaneId(repoRoot, branch),
+		isMain: true,
+		label: branch,
+		path: repoRoot,
+		sessions: []
+	};
+}
+const NO_REMOVED = new Set();
+/**
+* Reconcile ONE repo's lanes against the live `$sessions` cache: evict
+* deleted/archived rows (`removed`) and inject freshly-created ones, so a lane
+* mutates exactly like the flat Recents list. The backend snapshot stays the
+* datasource for structure and off-page history; this is the optimistic layer
+* on top (Apollo-style), reconciled away on the next snapshot refresh. Returns
+* the same repo ref when nothing changes (memo-stable).
+*/
+export function overlayRepoLanes(repo, live, removed = NO_REMOVED) {
+	const repoRoot = normalizePath(repo.path);
+	let changed = false;
+	// Snapshot lanes minus anything the user just deleted/archived.
+	const lanes = repo.groups.map((g) => {
+		if (!removed.size) {
+			return {
+				...g,
+				sessions: [...g.sessions]
+			};
+		}
+		const kept = g.sessions.filter((s) => !removed.has(s.id));
+		changed ||= kept.length !== g.sessions.length;
+		return {
+			...g,
+			sessions: kept
+		};
+	});
+	for (const session of live) {
+		const cwd = (session.cwd || "").trim();
+		if (removed.has(session.id) || !cwd) {
+			continue;
+		}
+		// (1) Join an EXISTING worktree lane by its own path. A linked worktree can
+		// live anywhere on disk (often a repo sibling, e.g. `repo-ci`), so nesting
+		// under the repo root isn't reliable — but the lane carries its real dir.
+		// Longest match wins; skip the root lane so an in-tree `.worktrees/<slug>`
+		// session isn't swallowed by main.
+		let lane;
+		let bestLen = -1;
+		for (const g of lanes) {
+			const lanePath = normalizePath(g.path);
+			if (!lanePath || lanePath === repoRoot || !isPathUnder(lanePath, cwd)) {
+				continue;
+			}
+			const len = segments(lanePath).length;
+			if (len > bestLen) {
+				bestLen = len;
+				lane = g;
+			}
+		}
+		// (2) Else place under the repo root via a computed lane (main / branch /
+		// in-tree `.worktrees` / kanban). Match by id, then path (the backend may
+		// key a worktree lane off the git-probed root OR a branch-style id), then
+		// the main-lane label; create it when the snapshot lacked it.
+		if (!lane) {
+			const placed = repo.path ? liveLaneForRepo(repo.path, session) : null;
+			if (!placed) {
+				continue;
+			}
+			const placedPath = normalizePath(placed.path);
+			lane = lanes.find((g) => g.id === placed.id) ?? (placed.isMain ? lanes.find((g) => g.isMain && g.label.toLowerCase() === placed.label.toLowerCase()) : undefined) ?? (!placed.isMain && placedPath ? lanes.find((g) => normalizePath(g.path) === placedPath) : undefined);
+			if (!lane) {
+				lane = {
+					...placed,
+					sessions: []
+				};
+				lanes.push(lane);
+			}
+		}
+		lane.sessions = upsertSession(lane.sessions, session);
+		changed = true;
+	}
+	if (!changed) {
+		return repo;
+	}
+	// Drop lanes emptied by eviction (the server only emits non-empty lanes; the
+	// git-worktree enhancer re-adds any still-real worktree as an empty lane).
+	const groups = sortWorktreeGroups(lanes.filter((g) => g.sessions.length > 0));
+	return {
+		...repo,
+		groups,
+		sessionCount: groups.reduce((n, g) => n + g.sessions.length, 0)
+	};
+}
+/** Project-level overlay: {@link overlayRepoLanes} across every repo subtree. */
+export function overlayLiveLanes(project, live, removed = NO_REMOVED) {
+	let changed = false;
+	const repos = project.repos.map((repo) => {
+		const next = overlayRepoLanes(repo, live, removed);
+		changed ||= next !== repo;
+		return next;
+	});
+	if (!changed) {
+		return project;
+	}
+	return {
+		...project,
+		repos,
+		sessionCount: repos.reduce((n, repo) => n + repo.sessionCount, 0)
+	};
+}
+/** Merge live sessions into per-project overview previews, keyed by project path. */
+export function overlayLivePreviews(projects, live, explicitProjects, limit, removed = new Set()) {
+	const byProject = new Map();
+	for (const session of live) {
+		if (removed.has(session.id)) {
+			continue;
+		}
+		const projectId = liveSessionProjectId(session, explicitProjects);
+		if (!projectId) {
+			continue;
+		}
+		const arr = byProject.get(projectId) ?? [];
+		arr.push(session);
+		byProject.set(projectId, arr);
+	}
+	const out = {};
+	for (const node of projects) {
+		if (!node.path) {
+			continue;
+		}
+		const liveRows = byProject.get(node.id) ?? [];
+		const base = (node.previewSessions ?? []).filter((session) => !removed.has(session.id));
+		if (!liveRows.length && !base.length) {
+			continue;
+		}
+		// Live rows take precedence (fresher title/activity/working state).
+		const map = new Map();
+		for (const session of [...liveRows, ...base]) {
+			if (!map.has(session.id)) {
+				map.set(session.id, session);
+			}
+		}
+		out[node.path] = [...map.values()].sort((a, b) => sessionRecency(b) - sessionRecency(a)).slice(0, limit);
+	}
+	return out;
+}
+
+//# sourceMappingURL=data:application/json;base64,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QUFLLE1BQU0sUUFBUSxVQUFVO0VBQ3pCLElBQUksQ0FBQyxLQUFLLE1BQU07R0FDWjtFQUNKO0VBQ0EsTUFBTSxXQUFXLFVBQVUsSUFBSSxLQUFLLEVBQUUsS0FBSyxDQUFDO0VBQzVDLE1BQU0sUUFBUSxLQUFLLG1CQUFtQixDQUFDLEVBQUMsQ0FBRSxRQUFPLFlBQVcsQ0FBQyxRQUFRLElBQUksUUFBUSxFQUFFLENBQUM7RUFDcEYsSUFBSSxDQUFDLFNBQVMsVUFBVSxDQUFDLEtBQUssUUFBUTtHQUNsQztFQUNKOztFQUVBLE1BQU0sTUFBTSxJQUFJLElBQUk7RUFDcEIsS0FBSyxNQUFNLFdBQVcsQ0FBQyxHQUFHLFVBQVUsR0FBRyxJQUFJLEdBQUc7R0FDMUMsSUFBSSxDQUFDLElBQUksSUFBSSxRQUFRLEVBQUUsR0FBRztJQUN0QixJQUFJLElBQUksUUFBUSxJQUFJLE9BQU87R0FDL0I7RUFDSjtFQUNBLElBQUksS0FBSyxRQUFRLENBQUMsR0FBRyxJQUFJLE9BQU8sQ0FBQyxDQUFDLENBQUMsTUFBTSxHQUFHLE1BQU0sZUFBZSxDQUFDLElBQUksZUFBZSxDQUFDLENBQUMsQ0FBQyxDQUFDLE1BQU0sR0FBRyxLQUFLO0NBQzNHO0NBQ0EsT0FBTztBQUNYIiwibmFtZXMiOltdLCJzb3VyY2VzIjpbIndvcmtzcGFjZS1ncm91cHMuanMiXSwidmVyc2lvbiI6Mywic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHsgbm9ybWFsaXplIH0gZnJvbSAnQC9saWIvdGV4dCc7XG4vKiogUGF0aCBzcGxpdCBpbnRvIHNlZ21lbnRzLCBpZ25vcmluZyB0cmFpbGluZyBzbGFzaGVzIGFuZCBtaXhlZCBzZXBhcmF0b3JzLiAqL1xuY29uc3Qgc2VnbWVudHMgPSAocGF0aCkgPT4gcGF0aFxuICAgIC5yZXBsYWNlKC9bL1xcXFxdKyQvLCAnJylcbiAgICAuc3BsaXQoL1svXFxcXF0vKVxuICAgIC5maWx0ZXIoQm9vbGVhbik7XG4vKiogQSBwYXRoIHdpdGggdHJhaWxpbmcgc2VwYXJhdG9ycyBzdHJpcHBlZCwgZm9yIHN0YWJsZSBlcXVhbGl0eSBjaGVja3MuICovXG5jb25zdCBub3JtYWxpemVQYXRoID0gKHBhdGgpID0+IChwYXRoID8/ICcnKS5yZXBsYWNlKC9bL1xcXFxdKyQvLCAnJyk7XG4vKiogTGFzdCBwYXRoIHNlZ21lbnQuICovXG5leHBvcnQgY29uc3QgYmFzZU5hbWUgPSAocGF0aCkgPT4gc2VnbWVudHMocGF0aCkucG9wKCk7XG4vLyBUaGUgYC53b3JrdHJlZXNgIGRpciBmb3IgYSBLQU5CQU4tVEFTSyB3b3JrdHJlZSBwYXRoLCBlbHNlIG51bGwuIE9ubHkgbWF0Y2hlc1xuLy8gdGFzayB3b3JrdHJlZXMgKGA8cmVwbz4vLndvcmt0cmVlcy90XzxoZXg+YCwgdGhlIGB0X+KApmAgaWQga2FuYmFuX2RiIG1pbnRzKSBzb1xuLy8gdGhlIG1hbnkgZXBoZW1lcmFsIHRhc2sgd29ya3RyZWVzIGNvbGxhcHNlIGludG8gb25lIGxhbmUg4oCUIHdoaWxlIHVzZXItbmFtZWRcbi8vIFwiTmV3IHdvcmt0cmVlXCIgZGlycyAoYDxyZXBvPi8ud29ya3RyZWVzLzxzbHVnPmApIHN0YXkgYXMgdGhlaXIgb3duIGxhbmVzLlxuY29uc3QgS0FOQkFOX0RJUl9SRSA9IC9eKC4qWy9cXFxcXVxcLndvcmt0cmVlcylbL1xcXFxddF9bMC05YS1mXStbL1xcXFxdPyQvO1xuZXhwb3J0IGZ1bmN0aW9uIGthbmJhbldvcmt0cmVlRGlyKHBhdGgpIHtcbiAgICByZXR1cm4gcGF0aC5tYXRjaChLQU5CQU5fRElSX1JFKT8uWzFdID8/IG51bGw7XG59XG4vKiogTGFiZWwgZm9yIGEgbWFpbi1jaGVja291dCBsYW5lIHdob3NlIHNlc3Npb24gcmVjb3JkZWQgbm8gYnJhbmNoLiAqL1xuZXhwb3J0IGNvbnN0IERFRkFVTFRfQlJBTkNIX0xBQkVMID0gJ21haW4nO1xuLyoqIFRoZSBvbmUgZGVmaW5pdGlvbiBvZiBhIG1haW4tY2hlY2tvdXQgbGFuZSBpZCAobXVzdCBtYXRjaCB0aGUgYmFja2VuZCB0cmVlKS4gKi9cbmV4cG9ydCBjb25zdCBicmFuY2hMYW5lSWQgPSAocmVwb1Jvb3QsIGJyYW5jaCkgPT4gYCR7cmVwb1Jvb3R9OjpicmFuY2g6OiR7KGJyYW5jaCA/PyAnJykudHJpbSgpfWA7XG4vKiogQSBzZXNzaW9uJ3MgcmVjZW5jeSBzdGFtcCAobGFzdCBhY3Rpdml0eSwgZmFsbGluZyBiYWNrIHRvIGNyZWF0aW9uKS4gKi9cbmV4cG9ydCBjb25zdCBzZXNzaW9uUmVjZW5jeSA9IChzZXNzaW9uKSA9PiBzZXNzaW9uLmxhc3RfYWN0aXZlIHx8IHNlc3Npb24uc3RhcnRlZF9hdCB8fCAwO1xuLyoqIERlZmF1bHQtYnJhbmNoIG5hbWVzIHRoYXQgcGluIHRvIHRoZSB0b3AgYW5kIHJlYWQgYXMgdGhlIHJlcG8ncyB0cnVuay4gKi9cbmNvbnN0IFRSVU5LX0JSQU5DSEVTID0gbmV3IFNldChbJ21haW4nLCAnbWFzdGVyJywgJ3RydW5rJywgJ2RldmVsb3AnXSk7XG5jb25zdCBpc1RydW5rTGFuZSA9IChncm91cCkgPT4gQm9vbGVhbihncm91cC5pc01haW4pICYmIFRSVU5LX0JSQU5DSEVTLmhhcyhncm91cC5sYWJlbC50b0xvd2VyQ2FzZSgpKTtcbi8qKiBBIGxhbmUncyByZWNlbmN5ID0gaXRzIG1vc3QtcmVjZW50bHktYWN0aXZlIHNlc3Npb24gKGVtcHR5IGxhbmVzIHNpbmspLiAqL1xuY29uc3QgbGFuZUFjdGl2aXR5ID0gKGdyb3VwKSA9PiBncm91cC5zZXNzaW9ucy5yZWR1Y2UoKG1heCwgc2Vzc2lvbikgPT4gTWF0aC5tYXgobWF4LCBzZXNzaW9uUmVjZW5jeShzZXNzaW9uKSksIDApO1xuLy8gTGFuZSB0aWVycyAobG93IHNvcnRzIGZpcnN0KTogdGhlIHJlcG8ncyBwcmltYXJ5IChcImhvbWVcIikgY2hlY2tvdXQgcGlucyBhYm92ZVxuLy8gZXZlcnl0aGluZyAoaXQncyBcIndoZXJlIHlvdSBhcmVcIiwgbGFiZWxlZCBieSBpdHMgbGl2ZSBicmFuY2gpLCB0aGVuIHRydW5rLFxuLy8gdGhlbiBvcmRpbmFyeSBicmFuY2hlcy93b3JrdHJlZXMsIHRoZW4gdGhlIGthbmJhbiBhZ2dyZWdhdGUuXG5jb25zdCBsYW5lUmFuayA9IChncm91cCkgPT4gZ3JvdXAuaXNIb21lID8gMCA6IGlzVHJ1bmtMYW5lKGdyb3VwKSA/IDEgOiBncm91cC5pc0thbmJhbiA/IDMgOiAyO1xuLyoqXG4gKiBTb3J0IGJ5IHRpZXIgKGhvbWUg4oaSIHRydW5rIOKGkiBicmFuY2hlcy93b3JrdHJlZXMg4oaSIGthbmJhbik7IHdpdGhpbiBhIHRpZXIsIGJ5XG4gKiBtb3N0LXJlY2VudCBhY3Rpdml0eSAoZW1wdHkgbGFuZXMgZmFsbCBsYXN0KSwgbGFiZWwgYXMgdGhlIHRpZWJyZWFrLlxuICovXG5mdW5jdGlvbiBjb21wYXJlV29ya3RyZWVHcm91cHMoYSwgYikge1xuICAgIGNvbnN0IGJ5UmFuayA9IGxhbmVSYW5rKGEpIC0gbGFuZVJhbmsoYik7XG4gICAgaWYgKGJ5UmFuayAhPT0gMCkge1xuICAgICAgICByZXR1cm4gYnlSYW5rO1xuICAgIH1cbiAgICBjb25zdCBieUFjdGl2aXR5ID0gbGFuZUFjdGl2aXR5KGIpIC0gbGFuZUFjdGl2aXR5KGEpO1xuICAgIHJldHVybiBieUFjdGl2aXR5IHx8IGEubGFiZWwubG9jYWxlQ29tcGFyZShiLmxhYmVsLCB1bmRlZmluZWQsIHsgc2Vuc2l0aXZpdHk6ICdiYXNlJyB9KTtcbn1cbmV4cG9ydCBmdW5jdGlvbiBzb3J0V29ya3RyZWVHcm91cHMoZ3JvdXBzKSB7XG4gICAgcmV0dXJuIFsuLi5ncm91cHNdLnNvcnQoY29tcGFyZVdvcmt0cmVlR3JvdXBzKTtcbn1cbi8qKlxuICogVklTVUFMIGVuaGFuY2VyIG9ubHk6IGluamVjdCBlbXB0eSBsYW5lcyBmcm9tIGEgbGl2ZSBgZ2l0IHdvcmt0cmVlIGxpc3RgIHNvIGFcbiAqIHJlcG8gc2hvd3MgaXRzIGJyYW5jaGVzL3dvcmt0cmVlcyBldmVuIHdoZW4gdGhleSBoYXZlIG5vIEhlcm1lcyBzZXNzaW9ucyB5ZXQuXG4gKiBUaGUgcmVwbydzIHJlYWwgc2Vzc2lvbiBsYW5lcyBhbHJlYWR5IGNvbWUgZnVsbHkgYnVpbHQgZnJvbSB0aGUgYmFja2VuZFxuICogKGBwcm9qZWN0cy5wcm9qZWN0X3Nlc3Npb25zYCk7IHRoaXMgbmV2ZXIgYWRkcyBvciBtb3ZlcyBzZXNzaW9uIHJvd3MsIGFuZCBpdFxuICogZGVncmFkZXMgdG8gYSBuby1vcCBvbiByZW1vdGUgYmFja2VuZHMgKHdoZXJlIHRoZSBFbGVjdHJvbiBwcm9iZSByZXR1cm5zXG4gKiBub3RoaW5nKS4gTGFuZXMgYWxyZWFkeSBwcmVzZW50IChieSBpZC9wYXRoKSBhcmUgbGVmdCB1bnRvdWNoZWQuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiBtZXJnZVJlcG9Xb3JrdHJlZUdyb3VwcyhyZXBvLCBkaXNjb3ZlcmVkV29ya3RyZWVzKSB7XG4gICAgLy8gQnJhbmNoLXByaW1hcnkgbGFiZWxzOiBhIGxpbmtlZCB3b3JrdHJlZSdzIGlkZW50aXR5IGluIGV2ZXJ5IGdpdCBVSSAoVlNcbiAgICAvLyBDb2RlLCBKZXRCcmFpbnMsIGxhenlnaXQsIOKApikgaXMgaXRzIENIRUNLRUQtT1VUIEJSQU5DSCwgbm90IHRoZSBkaXJlY3RvcnkgaXRcbiAgICAvLyBoYXBwZW5zIHRvIGxpdmUgaW4uIFRoZSBiYWNrZW5kIGxhYmVscyB0aGVzZSBsYW5lcyBieSBkaXIvc2x1ZzsgcmVsYWJlbCB0aGVtXG4gICAgLy8gdG8gdGhlIGxpdmUgYnJhbmNoIGZyb20gYGdpdCB3b3JrdHJlZSBsaXN0YCBzbyB0aGUgc2lkZWJhciBtYXRjaGVzIHRoZVxuICAgIC8vIGNvbXBvc2VyJ3MgYnJhbmNoIHN0cmlwLiBEZXRhY2hlZCB3b3JrdHJlZXMgKG5vIGJyYW5jaCkga2VlcCB0aGVpciBkaXIgbGFiZWwuXG4gICAgY29uc3QgbGl2ZUJyYW5jaEJ5UGF0aCA9IG5ldyBNYXAoKTtcbiAgICAvLyBJbnZlcnNlOiBicmFuY2gg4oaSIGl0cyBPTkUgbGl2ZSB3b3JrdHJlZSBwYXRoLiBnaXQgZ3VhcmFudGVlcyBhIGJyYW5jaCBpc1xuICAgIC8vIGNoZWNrZWQgb3V0IGluIGF0IG1vc3Qgb25lIHdvcmt0cmVlLCBzbyB0aGlzIG1hcHBpbmcgaXMgYSBmdW5jdGlvbiBhbmQgY2FuXG4gICAgLy8gcmUtYW5jaG9yIGEgbGFuZSB3aG9zZSBzdG9yZWQgcGF0aCBoYXMgZHJpZnRlZCBmcm9tIGdpdCB0cnV0aC5cbiAgICBjb25zdCBsaXZlUGF0aEJ5QnJhbmNoID0gbmV3IE1hcCgpO1xuICAgIGZvciAoY29uc3Qgd29ya3RyZWUgb2YgZGlzY292ZXJlZFdvcmt0cmVlcyA/PyBbXSkge1xuICAgICAgICBjb25zdCB3dFBhdGggPSBub3JtYWxpemVQYXRoKHdvcmt0cmVlLnBhdGgpO1xuICAgICAgICBjb25zdCBicmFuY2ggPSB3b3JrdHJlZS5icmFuY2g/LnRyaW0oKTtcbiAgICAgICAgaWYgKHd0UGF0aCAmJiBicmFuY2ggJiYgIXdvcmt0cmVlLmRldGFjaGVkKSB7XG4gICAgICAgICAgICBsaXZlQnJhbmNoQnlQYXRoLnNldCh3dFBhdGgsIGJyYW5jaCk7XG4gICAgICAgICAgICBsaXZlUGF0aEJ5QnJhbmNoLnNldChicmFuY2gudG9Mb3dlckNhc2UoKSwgd29ya3RyZWUucGF0aC50cmltKCkpO1xuICAgICAgICB9XG4gICAgfVxuICAgIC8vIFRoZSBwcmltYXJ5IChcImhvbWVcIikgY2hlY2tvdXQncyBMSVZFIGJyYW5jaC4gQSByZXBvIGRpciBpcyBvbmx5IGV2ZXIgb24gT05FXG4gICAgLy8gYnJhbmNoLCBzbyBldmVyeSBtYWluLWNoZWNrb3V0IHNlc3Npb24gbGFuZSAoaGlzdG9yaWNhbCBicmFuY2hlcyBvdmVyIHRoZVxuICAgIC8vIHNhbWUgcm9vdCBwYXRoKSBjb2xsYXBzZXMgaW50byBhIHNpbmdsZSBob21lIGxhbmUgbGFiZWxlZCBieSB0aGlzIGxpdmVcbiAgICAvLyBicmFuY2gsIGRlZmF1bHRpbmcgdG8gYG1haW5gLiBLbm93biBvbmx5IHdoZW4gdGhlIGxvY2FsIGdpdCBwcm9iZSByYW47XG4gICAgLy8gcmVtb3RlIGJhY2tlbmRzIGtlZXAgdGhlIGJhY2tlbmQncyByZWNvcmRlZC1icmFuY2ggbWFpbiBsYW5lIHVudG91Y2hlZC5cbiAgICBjb25zdCBtYWluV29ya3RyZWUgPSAoZGlzY292ZXJlZFdvcmt0cmVlcyA/PyBbXSkuZmluZCh3ID0+IHcuaXNNYWluKTtcbiAgICBjb25zdCBob21lQnJhbmNoID0gbWFpbldvcmt0cmVlICYmICFtYWluV29ya3RyZWUuZGV0YWNoZWQgPyBtYWluV29ya3RyZWUuYnJhbmNoPy50cmltKCkgfHwgREVGQVVMVF9CUkFOQ0hfTEFCRUwgOiAnJztcbiAgICAvLyBSZWNvbmNpbGUgYSBMSU5LRUQgd29ya3RyZWUgbGFuZSBhZ2FpbnN0IGdpdCB0cnV0aCBzbyBpdHMgbGFiZWwgQU5EIHBhdGhcbiAgICAvLyBkZXNjcmliZSB0aGUgU0FNRSB3b3JrdHJlZS4gVHdvIHJlcGFpciBkaXJlY3Rpb25zOlxuICAgIC8vICAxLiBQYXRoIGdpdCBrbm93cyDihpIgcmVsYWJlbCB0byB0aGF0IHBhdGgncyBsaXZlIGJyYW5jaCAoZ2l0IFVJcyBpZGVudGlmeSBhXG4gICAgLy8gICAgIHdvcmt0cmVlIGJ5IGl0cyBjaGVja2VkLW91dCBicmFuY2gsIG5vdCB0aGUgZGlyIGl0IGxpdmVzIGluKS5cbiAgICAvLyAgMi4gUGF0aCBnaXQgRE9FU04nVCBrbm93IGJ1dCB0aGUgbGFiZWwgSVMgYSBsaXZlIGJyYW5jaCDihpIgdGhlIGxhbmUncyBwYXRoXG4gICAgLy8gICAgIGhhcyBnb25lIHN0YWxlOyByZS1hbmNob3IgaXQgdG8gdGhhdCBicmFuY2gncyByZWFsIHBhdGgsIGVsc2UgXCJyZXZlYWxcIlxuICAgIC8vICAgICBvcGVucyBhIGRpZmZlcmVudCwgc3RhbGUgY2hlY2tvdXQuIFRoZSBob21lIGNoZWNrb3V0IGlzIGZvbGRlZFxuICAgIC8vICAgICBzZXBhcmF0ZWx5IChiZWxvdyksIG5ldmVyIGhlcmUuXG4gICAgY29uc3QgcmVjb25jaWxlID0gKGdyb3VwKSA9PiB7XG4gICAgICAgIGlmIChncm91cC5pc01haW4gfHwgZ3JvdXAuaXNLYW5iYW4pIHtcbiAgICAgICAgICAgIHJldHVybiBncm91cDtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCBicmFuY2hGb3JQYXRoID0gbGl2ZUJyYW5jaEJ5UGF0aC5nZXQobm9ybWFsaXplUGF0aChncm91cC5wYXRoKSk7XG4gICAgICAgIGlmIChicmFuY2hGb3JQYXRoKSB7XG4gICAgICAgICAgICByZXR1cm4gYnJhbmNoRm9yUGF0aCAhPT0gZ3JvdXAubGFiZWwgPyB7IC4uLmdyb3VwLCBsYWJlbDogYnJhbmNoRm9yUGF0aCB9IDogZ3JvdXA7XG4gICAgICAgIH1cbiAgICAgICAgY29uc3QgbGl2ZVBhdGggPSBsaXZlUGF0aEJ5QnJhbmNoLmdldChub3JtYWxpemUoZ3JvdXAubGFiZWwpKTtcbiAgICAgICAgaWYgKGxpdmVQYXRoICYmIG5vcm1hbGl6ZVBhdGgobGl2ZVBhdGgpICE9PSBub3JtYWxpemVQYXRoKGdyb3VwLnBhdGgpKSB7XG4gICAgICAgICAgICByZXR1cm4geyAuLi5ncm91cCwgaWQ6IGxpdmVQYXRoLCBwYXRoOiBsaXZlUGF0aCB9O1xuICAgICAgICB9XG4gICAgICAgIHJldHVybiBncm91cDtcbiAgICB9O1xuICAgIGNvbnN0IGRlZHVwZUJ5SWQgPSAoc2Vzc2lvbnMpID0+IHtcbiAgICAgICAgY29uc3QgYnlJZCA9IG5ldyBNYXAoKTtcbiAgICAgICAgZm9yIChjb25zdCBzZXNzaW9uIG9mIHNlc3Npb25zKSB7XG4gICAgICAgICAgICBieUlkLnNldChzZXNzaW9uLmlkLCBieUlkLmdldChzZXNzaW9uLmlkKSA/PyBzZXNzaW9uKTtcbiAgICAgICAgfVxuICAgICAgICByZXR1cm4gWy4uLmJ5SWQudmFsdWVzKCldO1xuICAgIH07XG4gICAgLy8gRm9sZCBldmVyeSBtYWluLWNoZWNrb3V0IGxhbmUgaW50byBvbmUgaG9tZSBsYW5lIGxhYmVsZWQgYnkgdGhlIGxpdmUgYnJhbmNoXG4gICAgLy8gKHRoZSByb290IGRpciBpcyBvbmx5IGV2ZXIgb24gb25lIGJyYW5jaCk7IHJlY29uY2lsZSB0aGUgbGlua2VkIHdvcmt0cmVlcy5cbiAgICAvLyBBbHdheXMgc2hvd24sIGV2ZW4gd2l0aCBubyBzZXNzaW9ucyBvbiB0aGUgY3VycmVudCBicmFuY2ggeWV0LiBSZW1vdGVcbiAgICAvLyBiYWNrZW5kcyAobm8gcHJvYmUg4oaSIG5vIGhvbWVCcmFuY2gpIGtlZXAgdGhlaXIgbWFpbiBsYW5lcyB1bnRvdWNoZWQuXG4gICAgY29uc3QgbWFpbkdyb3VwcyA9IHJlcG8uZ3JvdXBzLmZpbHRlcihncm91cCA9PiBncm91cC5pc01haW4pO1xuICAgIGNvbnN0IHJlY29uY2lsZWQgPSByZXBvLmdyb3Vwcy5maWx0ZXIoZ3JvdXAgPT4gIWdyb3VwLmlzTWFpbikubWFwKHJlY29uY2lsZSk7XG4gICAgaWYgKGhvbWVCcmFuY2gpIHtcbiAgICAgICAgcmVjb25jaWxlZC5wdXNoKHtcbiAgICAgICAgICAgIGlkOiBicmFuY2hMYW5lSWQocmVwby5pZCwgaG9tZUJyYW5jaCksXG4gICAgICAgICAgICBsYWJlbDogaG9tZUJyYW5jaCxcbiAgICAgICAgICAgIHBhdGg6IHJlcG8ucGF0aCxcbiAgICAgICAgICAgIGlzTWFpbjogdHJ1ZSxcbiAgICAgICAgICAgIGlzSG9tZTogdHJ1ZSxcbiAgICAgICAgICAgIHNlc3Npb25zOiBkZWR1cGVCeUlkKG1haW5Hcm91cHMuZmxhdE1hcChncm91cCA9PiBncm91cC5zZXNzaW9ucykpXG4gICAgICAgIH0pO1xuICAgIH1cbiAgICBlbHNlIHtcbiAgICAgICAgcmVjb25jaWxlZC5wdXNoKC4uLm1haW5Hcm91cHMpO1xuICAgIH1cbiAgICAvLyBDb2xsYXBzZSBhbnkgZHVwbGljYXRlIGEgcmUtYW5jaG9yIHByb2R1Y2VkIChhIHN0YWxlIGxhbmUgcmUtcG9pbnRlZCBvbnRvIGFcbiAgICAvLyBwYXRoIGEgcmVhbCBsYW5lIGFscmVhZHkgaG9sZHMpIOKAlCBrZWVwIHRoZSByaWNoZXIgKG1vcmUgc2Vzc2lvbnMpIGxhbmUuXG4gICAgY29uc3QgYnlQYXRoID0gbmV3IE1hcCgpO1xuICAgIGNvbnN0IG1lcmdlZCA9IFtdO1xuICAgIGZvciAoY29uc3QgZ3JvdXAgb2YgcmVjb25jaWxlZCkge1xuICAgICAgICBjb25zdCBrZXkgPSAhZ3JvdXAuaXNNYWluICYmIGdyb3VwLnBhdGggPyBub3JtYWxpemVQYXRoKGdyb3VwLnBhdGgpIDogJyc7XG4gICAgICAgIGNvbnN0IGV4aXN0aW5nID0ga2V5ID8gYnlQYXRoLmdldChrZXkpIDogdW5kZWZpbmVkO1xuICAgICAgICBpZiAoZXhpc3RpbmcpIHtcbiAgICAgICAgICAgIGlmIChncm91cC5zZXNzaW9ucy5sZW5ndGggPiBleGlzdGluZy5zZXNzaW9ucy5sZW5ndGgpIHtcbiAgICAgICAgICAgICAgICBtZXJnZWRbbWVyZ2VkLmluZGV4T2YoZXhpc3RpbmcpXSA9IGdyb3VwO1xuICAgICAgICAgICAgICAgIGJ5UGF0aC5zZXQoa2V5LCBncm91cCk7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICBpZiAoa2V5KSB7XG4gICAgICAgICAgICBieVBhdGguc2V0KGtleSwgZ3JvdXApO1xuICAgICAgICB9XG4gICAgICAgIG1lcmdlZC5wdXNoKGdyb3VwKTtcbiAgICB9XG4gICAgY29uc3Qgc2VlbklkcyA9IG5ldyBTZXQobWVyZ2VkLm1hcChncm91cCA9PiBncm91cC5pZCkpO1xuICAgIGNvbnN0IHNlZW5QYXRocyA9IG5ldyBTZXQobWVyZ2VkLm1hcChncm91cCA9PiBncm91cC5wYXRoKS5maWx0ZXIoKHBhdGgpID0+IEJvb2xlYW4ocGF0aCkpKTtcbiAgICAvLyBEZWR1cGUgYnkgYnJhbmNoIGxhYmVsIHRvbzogYSBicmFuY2ggc2hvd3Mgb25jZSBldmVuIGlmIGl0J3MgY2hlY2tlZCBvdXQgaW5cbiAgICAvLyBhIGxpbmtlZCB3b3JrdHJlZSBBTkQgYWxyZWFkeSBoYXMgYSBzZXNzaW9uIGxhbmUuXG4gICAgY29uc3Qgc2VlbkxhYmVscyA9IG5ldyBTZXQobWVyZ2VkLm1hcChncm91cCA9PiBncm91cC5sYWJlbC50b0xvd2VyQ2FzZSgpKSk7XG4gICAgZm9yIChjb25zdCB3b3JrdHJlZSBvZiBkaXNjb3ZlcmVkV29ya3RyZWVzID8/IFtdKSB7XG4gICAgICAgIGNvbnN0IHd0UGF0aCA9IHdvcmt0cmVlLnBhdGg/LnRyaW0oKTtcbiAgICAgICAgaWYgKCF3dFBhdGgpIHtcbiAgICAgICAgICAgIGNvbnRpbnVlO1xuICAgICAgICB9XG4gICAgICAgIC8vIFRoZSBob21lIGNoZWNrb3V0IGlzIGFscmVhZHkgdGhlIGNvbGxhcHNlZCBob21lIGxhbmUgKGFib3ZlKS5cbiAgICAgICAgaWYgKHdvcmt0cmVlLmlzTWFpbiAmJiBob21lQnJhbmNoKSB7XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICAvLyBLYW5iYW4gdGFzayB3b3JrdHJlZXMgbmV2ZXIgZ2V0IHRoZWlyIG93biBsYW5lIOKAlCB0aGV5IGZvbGQgaW50byB0aGVcbiAgICAgICAgLy8gc2Vzc2lvbi1kZXJpdmVkIGA6OmthbmJhbmAgYnVja2V0LiBMaXN0aW5nIGV2ZXJ5IGBnaXQgd29ya3RyZWUgbGlzdGAgZW50cnlcbiAgICAgICAgLy8gaGVyZSBpcyBleGFjdGx5IHdoYXQgYmxldyB0aGUgc2lkZWJhciB1cCB0byBodW5kcmVkcyBvZiBlbXB0eSByb3dzLlxuICAgICAgICBpZiAoIXdvcmt0cmVlLmlzTWFpbiAmJiBrYW5iYW5Xb3JrdHJlZURpcih3dFBhdGgpKSB7XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCBsYWJlbCA9ICh3b3JrdHJlZS5pc01haW4gPyB3b3JrdHJlZS5icmFuY2g/LnRyaW0oKSB8fCBERUZBVUxUX0JSQU5DSF9MQUJFTCA6IHdvcmt0cmVlLmJyYW5jaD8udHJpbSgpKSB8fFxuICAgICAgICAgICAgYmFzZU5hbWUod3RQYXRoKSB8fFxuICAgICAgICAgICAgd3RQYXRoO1xuICAgICAgICBjb25zdCBpZCA9IHdvcmt0cmVlLmlzTWFpbiA/IGJyYW5jaExhbmVJZChyZXBvLmlkLCBsYWJlbCkgOiB3dFBhdGg7XG4gICAgICAgIGNvbnN0IGFscmVhZHlTZWVuID0gc2Vlbklkcy5oYXMoaWQpIHx8IHNlZW5MYWJlbHMuaGFzKGxhYmVsLnRvTG93ZXJDYXNlKCkpIHx8ICghd29ya3RyZWUuaXNNYWluICYmIHNlZW5QYXRocy5oYXMod3RQYXRoKSk7XG4gICAgICAgIGlmIChhbHJlYWR5U2Vlbikge1xuICAgICAgICAgICAgY29udGludWU7XG4gICAgICAgIH1cbiAgICAgICAgbWVyZ2VkLnB1c2goeyBpZCwgaXNNYWluOiB3b3JrdHJlZS5pc01haW4sIGxhYmVsLCBwYXRoOiB3dFBhdGgsIHNlc3Npb25zOiBbXSB9KTtcbiAgICAgICAgc2Vlbklkcy5hZGQoaWQpO1xuICAgICAgICBzZWVuUGF0aHMuYWRkKHd0UGF0aCk7XG4gICAgICAgIHNlZW5MYWJlbHMuYWRkKGxhYmVsLnRvTG93ZXJDYXNlKCkpO1xuICAgIH1cbiAgICByZXR1cm4gc29ydFdvcmt0cmVlR3JvdXBzKG1lcmdlZCk7XG59XG4vLyDilIDilIAgTGl2ZSBzZXNzaW9uIG92ZXJsYXkg4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSAXG4vLyBUaGUgYmFja2VuZCB0cmVlIGlzIGEgc25hcHNob3QgKHNlc3Npb25zIHdpdGggPj0xIG1lc3NhZ2UsIHJlZnJlc2hlZCBvbiBhXG4vLyB0dXJuIGJvdW5kYXJ5KS4gRm9yIHBhcml0eSB3aXRoIHRoZSBmbGF0IFJlY2VudHMgbGlzdCDigJQgaW5zdGFudCBpbnNlcnRpb24gb2Zcbi8vIGEgZnJlc2hseS1jcmVhdGVkIHNlc3Npb24gYW5kIHRoZSBsaXZlIFwid29ya2luZ1wiIGFyYyDigJQgd2Ugb3ZlcmxheSB0aGUgbGl2ZVxuLy8gYCRzZXNzaW9uc2Agc3RvcmUgb250byB0aGUgdHJlZSBhdCByZW5kZXIgdGltZS4gVGhpcyBpcyBBRERJVElWRSBvbmx5OiB0aGVcbi8vIGJhY2tlbmQgc3RpbGwgb3ducyBtZW1iZXJzaGlwLCBzdHJ1Y3R1cmUsIGNvdW50cywgYW5kIGhpc3RvcnkuIFRoZSBvdmVybGF5XG4vLyBqdXN0IHBsYWNlcyByb3dzIGFscmVhZHkgcHJlc2VudCBpbiBgJHNlc3Npb25zYCBpbnRvIHRoZSBwcm9qZWN0L2xhbmUgdGhlXG4vLyBiYWNrZW5kIHdvdWxkIHB1dCB0aGVtIGluLCB1c2luZyB0aGUgc2FtZSBpZCBzY2hlbWUuIFdvcmt0cmVlL2thbmJhbiBmb2xkaW5nXG4vLyBuZWVkcyB0aGUgYmFja2VuZCBjb21tb24tcm9vdCBwcm9iZSwgc28gdGhvc2Ugcm93cyBhcmUgbGVmdCBmb3IgdGhlIG5leHRcbi8vIHRyZWUgcmVmcmVzaDsgdGhlIGNvbW1vbiBjYXNlIChhIG5ldyBtYWluLWNoZWNrb3V0IHNlc3Npb24pIG92ZXJsYXlzIGhlcmUuXG4vKiogVHJ1ZSB3aGVuIGB0YXJnZXRgIGVxdWFscyBgZm9sZGVyYCBvciBpcyBuZXN0ZWQgdW5kZXIgaXQgKHNlZ21lbnQtd2lzZSkuICovXG5mdW5jdGlvbiBpc1BhdGhVbmRlcihmb2xkZXIsIHRhcmdldCkge1xuICAgIGNvbnN0IGYgPSBzZWdtZW50cyhmb2xkZXIpO1xuICAgIGNvbnN0IHQgPSBzZWdtZW50cyh0YXJnZXQpO1xuICAgIGlmICghZi5sZW5ndGggfHwgZi5sZW5ndGggPiB0Lmxlbmd0aCkge1xuICAgICAgICByZXR1cm4gZmFsc2U7XG4gICAgfVxuICAgIHJldHVybiBmLmV2ZXJ5KChzZWcsIGkpID0+IHNlZyA9PT0gdFtpXSk7XG59XG4vKipcbiAqIFRoZSBwcm9qZWN0IGEgbGl2ZSBzZXNzaW9uIGJlbG9uZ3MgdG8gKG92ZXJ2aWV3IG1lbWJlcnNoaXApIOKAlCBleHBsaWNpdCBwcm9qZWN0XG4gKiBieSBsb25nZXN0LXByZWZpeCBmb2xkZXIsIGVsc2UgdGhlIHJlcG8gcm9vdCAodGhlIGF1dG8tcHJvamVjdCBpZCkuIEFuIElOLVRSRUVcbiAqIGxpbmtlZCB3b3JrdHJlZSAoYDxyZXBvUm9vdD4vLndvcmt0cmVlcy88c2x1Zz5gKSBiZWxvbmdzIHRvIHRoZSBTQU1FIHByb2plY3QgYXNcbiAqIGl0cyByZXBvIHJvb3QgKHRoZSByb290IGlzIHJpZ2h0IHRoZXJlIGluIHRoZSBwYXRoKSwgc28gYSBmcmVzaGx5LWNyZWF0ZWRcbiAqIHdvcmt0cmVlIHNlc3Npb24g4oCUIGUuZy4gZnJvbSBcImNvbnZlcnQgYSBicmFuY2hcIiAvIFwibmV3IHdvcmt0cmVlXCIg4oCUIHN1cmZhY2VzIGluXG4gKiB0aGUgb3ZlcnZpZXcgYXQgb25jZSBpbnN0ZWFkIG9mIHdhaXRpbmcgZm9yIHRoZSBuZXh0IGJhY2tlbmQgcmVmcmVzaC4gUmV0dXJuc1xuICogbnVsbCBvbmx5IGZvciBzZXNzaW9ucyB3ZSBnZW51aW5lbHkgY2FuJ3QgcGxhY2UgZnJvbSB0aGUgcm93IGFsb25lOiBjd2QtbGVzcyxcbiAqIGthbmJhbi10YXNrIHdvcmt0cmVlcyAodGhleSBmb2xkIGludG8gdGhlIGthbmJhbiBidWNrZXQpLCBvciBhIHdvcmt0cmVlIHRoYXRcbiAqIGxpdmVzIE9VVFNJREUgdGhlIHJlcG8gcm9vdCAoYSBzaWJsaW5nIGRpciB3aG9zZSBwcm9qZWN0IGNhbid0IGJlIGRlcml2ZWQpLlxuICovXG5leHBvcnQgZnVuY3Rpb24gbGl2ZVNlc3Npb25Qcm9qZWN0SWQoc2Vzc2lvbiwgZXhwbGljaXRQcm9qZWN0cykge1xuICAgIGNvbnN0IGN3ZCA9IChzZXNzaW9uLmN3ZCB8fCAnJykudHJpbSgpO1xuICAgIGlmICghY3dkIHx8IGthbmJhbldvcmt0cmVlRGlyKGN3ZCkpIHtcbiAgICAgICAgcmV0dXJuIG51bGw7XG4gICAgfVxuICAgIC8vIE5vIHBlcnNpc3RlZCByZXBvIHJvb3QgeWV0IChicmFuZC1uZXcgc2Vzc2lvbikg4oaSIHRoZSBjd2QgaXMgdGhlIHJvb3QuXG4gICAgY29uc3QgcmVwb1Jvb3QgPSAoc2Vzc2lvbi5naXRfcmVwb19yb290IHx8ICcnKS50cmltKCkgfHwgY3dkO1xuICAgIGNvbnN0IHVuZGVyUmVwbyA9IGN3ZCA9PT0gcmVwb1Jvb3QgfHwgY3dkLnN0YXJ0c1dpdGgoYCR7cmVwb1Jvb3R9L2ApIHx8IGN3ZC5zdGFydHNXaXRoKGAke3JlcG9Sb290fVxcXFxgKTtcbiAgICBpZiAoIXVuZGVyUmVwbykge1xuICAgICAgICByZXR1cm4gbnVsbDtcbiAgICB9XG4gICAgbGV0IHByb2plY3RJZCA9ICcnO1xuICAgIGxldCBiZXN0TGVuID0gLTE7XG4gICAgZm9yIChjb25zdCBwcm9qZWN0IG9mIGV4cGxpY2l0UHJvamVjdHMpIHtcbiAgICAgICAgaWYgKHByb2plY3QuYXJjaGl2ZWQpIHtcbiAgICAgICAgICAgIGNvbnRpbnVlO1xuICAgICAgICB9XG4gICAgICAgIGZvciAoY29uc3QgZm9sZGVyIG9mIHByb2plY3QuZm9sZGVycykge1xuICAgICAgICAgICAgaWYgKGlzUGF0aFVuZGVyKGZvbGRlci5wYXRoLCBjd2QpIHx8IGlzUGF0aFVuZGVyKGZvbGRlci5wYXRoLCByZXBvUm9vdCkpIHtcbiAgICAgICAgICAgICAgICBjb25zdCBsZW4gPSBzZWdtZW50cyhmb2xkZXIucGF0aCkubGVuZ3RoO1xuICAgICAgICAgICAgICAgIGlmIChsZW4gPiBiZXN0TGVuKSB7XG4gICAgICAgICAgICAgICAgICAgIGJlc3RMZW4gPSBsZW47XG4gICAgICAgICAgICAgICAgICAgIHByb2plY3RJZCA9IHByb2plY3QuaWQ7XG4gICAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgfVxuICAgICAgICB9XG4gICAgfVxuICAgIHJldHVybiBwcm9qZWN0SWQgfHwgcmVwb1Jvb3Q7XG59XG5jb25zdCB1cHNlcnRTZXNzaW9uID0gKHJvd3MsIHNlc3Npb24pID0+IFtzZXNzaW9uLCAuLi5yb3dzLmZpbHRlcihyb3cgPT4gcm93LmlkICE9PSBzZXNzaW9uLmlkKV0uc29ydCgoYSwgYikgPT4gYi5zdGFydGVkX2F0IC0gYS5zdGFydGVkX2F0KTtcbi8qKlxuICogVGhlIGxhbmUgYSBsaXZlIHNlc3Npb24gYmVsb25ncyB0byBXSVRISU4gYSBrbm93biByZXBvIHJvb3QsIGJ5IHBhdGgg4oCUIHRoZVxuICogZW50ZXJlZCBwcm9qZWN0IGFscmVhZHkga25vd3MgaXRzIHJlcG8gcm9vdHMsIHNvIHdlIGRvbid0IG5lZWQgdGhlIHNlc3Npb24nc1xuICogKG9mdGVuLXVuc2V0LCBvbiBhIGZyZXNoIHJvdykgZ2l0X3JlcG9fcm9vdC4gTWlycm9ycyB0aGUgYmFja2VuZCdzIGxhbmUgaWRzOlxuICogbWFpbiBjaGVja291dCAtPiBicmFuY2ggbGFuZSwgYC53b3JrdHJlZXMvdF88aGV4PmAgLT4ga2FuYmFuLCBhbnkgb3RoZXJcbiAqIGAud29ya3RyZWVzLzxzbHVnPmAgLT4gdGhhdCB3b3JrdHJlZSdzIG93biBsYW5lLlxuICovXG5mdW5jdGlvbiBsaXZlTGFuZUZvclJlcG8ocmVwb1Jvb3QsIHNlc3Npb24pIHtcbiAgICBjb25zdCBjd2QgPSAoc2Vzc2lvbi5jd2QgfHwgJycpLnRyaW0oKTtcbiAgICBpZiAoIWN3ZCB8fCAhaXNQYXRoVW5kZXIocmVwb1Jvb3QsIGN3ZCkpIHtcbiAgICAgICAgcmV0dXJuIG51bGw7XG4gICAgfVxuICAgIGNvbnN0IHd0ID0gY3dkLm1hdGNoKC9eKC4qWy9cXFxcXVxcLndvcmt0cmVlcylbL1xcXFxdKFteL1xcXFxdKykvKTtcbiAgICBpZiAod3QpIHtcbiAgICAgICAgY29uc3QgW3dvcmt0cmVlUm9vdCwgd29ya3RyZWVzRGlyLCBzbHVnXSA9IFt3dFswXSwgd3RbMV0sIHd0WzJdXTtcbiAgICAgICAgcmV0dXJuIC9edF9bMC05YS1mXSskLy50ZXN0KHNsdWcpXG4gICAgICAgICAgICA/IHsgaWQ6IGAke3JlcG9Sb290fTo6a2FuYmFuYCwgaXNLYW5iYW46IHRydWUsIGlzTWFpbjogZmFsc2UsIGxhYmVsOiAna2FuYmFuJywgcGF0aDogd29ya3RyZWVzRGlyLCBzZXNzaW9uczogW10gfVxuICAgICAgICAgICAgOiB7IGlkOiB3b3JrdHJlZVJvb3QsIGlzTWFpbjogZmFsc2UsIGxhYmVsOiBzbHVnLCBwYXRoOiB3b3JrdHJlZVJvb3QsIHNlc3Npb25zOiBbXSB9O1xuICAgIH1cbiAgICBjb25zdCBicmFuY2ggPSAoc2Vzc2lvbi5naXRfYnJhbmNoIHx8ICcnKS50cmltKCkgfHwgREVGQVVMVF9CUkFOQ0hfTEFCRUw7XG4gICAgcmV0dXJuIHsgaWQ6IGJyYW5jaExhbmVJZChyZXBvUm9vdCwgYnJhbmNoKSwgaXNNYWluOiB0cnVlLCBsYWJlbDogYnJhbmNoLCBwYXRoOiByZXBvUm9vdCwgc2Vzc2lvbnM6IFtdIH07XG59XG5jb25zdCBOT19SRU1PVkVEID0gbmV3IFNldCgpO1xuLyoqXG4gKiBSZWNvbmNpbGUgT05FIHJlcG8ncyBsYW5lcyBhZ2FpbnN0IHRoZSBsaXZlIGAkc2Vzc2lvbnNgIGNhY2hlOiBldmljdFxuICogZGVsZXRlZC9hcmNoaXZlZCByb3dzIChgcmVtb3ZlZGApIGFuZCBpbmplY3QgZnJlc2hseS1jcmVhdGVkIG9uZXMsIHNvIGEgbGFuZVxuICogbXV0YXRlcyBleGFjdGx5IGxpa2UgdGhlIGZsYXQgUmVjZW50cyBsaXN0LiBUaGUgYmFja2VuZCBzbmFwc2hvdCBzdGF5cyB0aGVcbiAqIGRhdGFzb3VyY2UgZm9yIHN0cnVjdHVyZSBhbmQgb2ZmLXBhZ2UgaGlzdG9yeTsgdGhpcyBpcyB0aGUgb3B0aW1pc3RpYyBsYXllclxuICogb24gdG9wIChBcG9sbG8tc3R5bGUpLCByZWNvbmNpbGVkIGF3YXkgb24gdGhlIG5leHQgc25hcHNob3QgcmVmcmVzaC4gUmV0dXJuc1xuICogdGhlIHNhbWUgcmVwbyByZWYgd2hlbiBub3RoaW5nIGNoYW5nZXMgKG1lbW8tc3RhYmxlKS5cbiAqL1xuZXhwb3J0IGZ1bmN0aW9uIG92ZXJsYXlSZXBvTGFuZXMocmVwbywgbGl2ZSwgcmVtb3ZlZCA9IE5PX1JFTU9WRUQpIHtcbiAgICBjb25zdCByZXBvUm9vdCA9IG5vcm1hbGl6ZVBhdGgocmVwby5wYXRoKTtcbiAgICBsZXQgY2hhbmdlZCA9IGZhbHNlO1xuICAgIC8vIFNuYXBzaG90IGxhbmVzIG1pbnVzIGFueXRoaW5nIHRoZSB1c2VyIGp1c3QgZGVsZXRlZC9hcmNoaXZlZC5cbiAgICBjb25zdCBsYW5lcyA9IHJlcG8uZ3JvdXBzLm1hcChnID0+IHtcbiAgICAgICAgaWYgKCFyZW1vdmVkLnNpemUpIHtcbiAgICAgICAgICAgIHJldHVybiB7IC4uLmcsIHNlc3Npb25zOiBbLi4uZy5zZXNzaW9uc10gfTtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCBrZXB0ID0gZy5zZXNzaW9ucy5maWx0ZXIocyA9PiAhcmVtb3ZlZC5oYXMocy5pZCkpO1xuICAgICAgICBjaGFuZ2VkIHx8PSBrZXB0Lmxlbmd0aCAhPT0gZy5zZXNzaW9ucy5sZW5ndGg7XG4gICAgICAgIHJldHVybiB7IC4uLmcsIHNlc3Npb25zOiBrZXB0IH07XG4gICAgfSk7XG4gICAgZm9yIChjb25zdCBzZXNzaW9uIG9mIGxpdmUpIHtcbiAgICAgICAgY29uc3QgY3dkID0gKHNlc3Npb24uY3dkIHx8ICcnKS50cmltKCk7XG4gICAgICAgIGlmIChyZW1vdmVkLmhhcyhzZXNzaW9uLmlkKSB8fCAhY3dkKSB7XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICAvLyAoMSkgSm9pbiBhbiBFWElTVElORyB3b3JrdHJlZSBsYW5lIGJ5IGl0cyBvd24gcGF0aC4gQSBsaW5rZWQgd29ya3RyZWUgY2FuXG4gICAgICAgIC8vIGxpdmUgYW55d2hlcmUgb24gZGlzayAob2Z0ZW4gYSByZXBvIHNpYmxpbmcsIGUuZy4gYHJlcG8tY2lgKSwgc28gbmVzdGluZ1xuICAgICAgICAvLyB1bmRlciB0aGUgcmVwbyByb290IGlzbid0IHJlbGlhYmxlIOKAlCBidXQgdGhlIGxhbmUgY2FycmllcyBpdHMgcmVhbCBkaXIuXG4gICAgICAgIC8vIExvbmdlc3QgbWF0Y2ggd2luczsgc2tpcCB0aGUgcm9vdCBsYW5lIHNvIGFuIGluLXRyZWUgYC53b3JrdHJlZXMvPHNsdWc+YFxuICAgICAgICAvLyBzZXNzaW9uIGlzbid0IHN3YWxsb3dlZCBieSBtYWluLlxuICAgICAgICBsZXQgbGFuZTtcbiAgICAgICAgbGV0IGJlc3RMZW4gPSAtMTtcbiAgICAgICAgZm9yIChjb25zdCBnIG9mIGxhbmVzKSB7XG4gICAgICAgICAgICBjb25zdCBsYW5lUGF0aCA9IG5vcm1hbGl6ZVBhdGgoZy5wYXRoKTtcbiAgICAgICAgICAgIGlmICghbGFuZVBhdGggfHwgbGFuZVBhdGggPT09IHJlcG9Sb290IHx8ICFpc1BhdGhVbmRlcihsYW5lUGF0aCwgY3dkKSkge1xuICAgICAgICAgICAgICAgIGNvbnRpbnVlO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgY29uc3QgbGVuID0gc2VnbWVudHMobGFuZVBhdGgpLmxlbmd0aDtcbiAgICAgICAgICAgIGlmIChsZW4gPiBiZXN0TGVuKSB7XG4gICAgICAgICAgICAgICAgYmVzdExlbiA9IGxlbjtcbiAgICAgICAgICAgICAgICBsYW5lID0gZztcbiAgICAgICAgICAgIH1cbiAgICAgICAgfVxuICAgICAgICAvLyAoMikgRWxzZSBwbGFjZSB1bmRlciB0aGUgcmVwbyByb290IHZpYSBhIGNvbXB1dGVkIGxhbmUgKG1haW4gLyBicmFuY2ggL1xuICAgICAgICAvLyBpbi10cmVlIGAud29ya3RyZWVzYCAvIGthbmJhbikuIE1hdGNoIGJ5IGlkLCB0aGVuIHBhdGggKHRoZSBiYWNrZW5kIG1heVxuICAgICAgICAvLyBrZXkgYSB3b3JrdHJlZSBsYW5lIG9mZiB0aGUgZ2l0LXByb2JlZCByb290IE9SIGEgYnJhbmNoLXN0eWxlIGlkKSwgdGhlblxuICAgICAgICAvLyB0aGUgbWFpbi1sYW5lIGxhYmVsOyBjcmVhdGUgaXQgd2hlbiB0aGUgc25hcHNob3QgbGFja2VkIGl0LlxuICAgICAgICBpZiAoIWxhbmUpIHtcbiAgICAgICAgICAgIGNvbnN0IHBsYWNlZCA9IHJlcG8ucGF0aCA/IGxpdmVMYW5lRm9yUmVwbyhyZXBvLnBhdGgsIHNlc3Npb24pIDogbnVsbDtcbiAgICAgICAgICAgIGlmICghcGxhY2VkKSB7XG4gICAgICAgICAgICAgICAgY29udGludWU7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICBjb25zdCBwbGFjZWRQYXRoID0gbm9ybWFsaXplUGF0aChwbGFjZWQucGF0aCk7XG4gICAgICAgICAgICBsYW5lID1cbiAgICAgICAgICAgICAgICBsYW5lcy5maW5kKGcgPT4gZy5pZCA9PT0gcGxhY2VkLmlkKSA/P1xuICAgICAgICAgICAgICAgICAgICAocGxhY2VkLmlzTWFpblxuICAgICAgICAgICAgICAgICAgICAgICAgPyBsYW5lcy5maW5kKGcgPT4gZy5pc01haW4gJiYgZy5sYWJlbC50b0xvd2VyQ2FzZSgpID09PSBwbGFjZWQubGFiZWwudG9Mb3dlckNhc2UoKSlcbiAgICAgICAgICAgICAgICAgICAgICAgIDogdW5kZWZpbmVkKSA/P1xuICAgICAgICAgICAgICAgICAgICAoIXBsYWNlZC5pc01haW4gJiYgcGxhY2VkUGF0aCA/IGxhbmVzLmZpbmQoZyA9PiBub3JtYWxpemVQYXRoKGcucGF0aCkgPT09IHBsYWNlZFBhdGgpIDogdW5kZWZpbmVkKTtcbiAgICAgICAgICAgIGlmICghbGFuZSkge1xuICAgICAgICAgICAgICAgIGxhbmUgPSB7IC4uLnBsYWNlZCwgc2Vzc2lvbnM6IFtdIH07XG4gICAgICAgICAgICAgICAgbGFuZXMucHVzaChsYW5lKTtcbiAgICAgICAgICAgIH1cbiAgICAgICAgfVxuICAgICAgICBsYW5lLnNlc3Npb25zID0gdXBzZXJ0U2Vzc2lvbihsYW5lLnNlc3Npb25zLCBzZXNzaW9uKTtcbiAgICAgICAgY2hhbmdlZCA9IHRydWU7XG4gICAgfVxuICAgIGlmICghY2hhbmdlZCkge1xuICAgICAgICByZXR1cm4gcmVwbztcbiAgICB9XG4gICAgLy8gRHJvcCBsYW5lcyBlbXB0aWVkIGJ5IGV2aWN0aW9uICh0aGUgc2VydmVyIG9ubHkgZW1pdHMgbm9uLWVtcHR5IGxhbmVzOyB0aGVcbiAgICAvLyBnaXQtd29ya3RyZWUgZW5oYW5jZXIgcmUtYWRkcyBhbnkgc3RpbGwtcmVhbCB3b3JrdHJlZSBhcyBhbiBlbXB0eSBsYW5lKS5cbiAgICBjb25zdCBncm91cHMgPSBzb3J0V29ya3RyZWVHcm91cHMobGFuZXMuZmlsdGVyKGcgPT4gZy5zZXNzaW9ucy5sZW5ndGggPiAwKSk7XG4gICAgcmV0dXJuIHsgLi4ucmVwbywgZ3JvdXBzLCBzZXNzaW9uQ291bnQ6IGdyb3Vwcy5yZWR1Y2UoKG4sIGcpID0+IG4gKyBnLnNlc3Npb25zLmxlbmd0aCwgMCkgfTtcbn1cbi8qKiBQcm9qZWN0LWxldmVsIG92ZXJsYXk6IHtAbGluayBvdmVybGF5UmVwb0xhbmVzfSBhY3Jvc3MgZXZlcnkgcmVwbyBzdWJ0cmVlLiAqL1xuZXhwb3J0IGZ1bmN0aW9uIG92ZXJsYXlMaXZlTGFuZXMocHJvamVjdCwgbGl2ZSwgcmVtb3ZlZCA9IE5PX1JFTU9WRUQpIHtcbiAgICBsZXQgY2hhbmdlZCA9IGZhbHNlO1xuICAgIGNvbnN0IHJlcG9zID0gcHJvamVjdC5yZXBvcy5tYXAocmVwbyA9PiB7XG4gICAgICAgIGNvbnN0IG5leHQgPSBvdmVybGF5UmVwb0xhbmVzKHJlcG8sIGxpdmUsIHJlbW92ZWQpO1xuICAgICAgICBjaGFuZ2VkIHx8PSBuZXh0ICE9PSByZXBvO1xuICAgICAgICByZXR1cm4gbmV4dDtcbiAgICB9KTtcbiAgICBpZiAoIWNoYW5nZWQpIHtcbiAgICAgICAgcmV0dXJuIHByb2plY3Q7XG4gICAgfVxuICAgIHJldHVybiB7IC4uLnByb2plY3QsIHJlcG9zLCBzZXNzaW9uQ291bnQ6IHJlcG9zLnJlZHVjZSgobiwgcmVwbykgPT4gbiArIHJlcG8uc2Vzc2lvbkNvdW50LCAwKSB9O1xufVxuLyoqIE1lcmdlIGxpdmUgc2Vzc2lvbnMgaW50byBwZXItcHJvamVjdCBvdmVydmlldyBwcmV2aWV3cywga2V5ZWQgYnkgcHJvamVjdCBwYXRoLiAqL1xuZXhwb3J0IGZ1bmN0aW9uIG92ZXJsYXlMaXZlUHJldmlld3MocHJvamVjdHMsIGxpdmUsIGV4cGxpY2l0UHJvamVjdHMsIGxpbWl0LCByZW1vdmVkID0gbmV3IFNldCgpKSB7XG4gICAgY29uc3QgYnlQcm9qZWN0ID0gbmV3IE1hcCgpO1xuICAgIGZvciAoY29uc3Qgc2Vzc2lvbiBvZiBsaXZlKSB7XG4gICAgICAgIGlmIChyZW1vdmVkLmhhcyhzZXNzaW9uLmlkKSkge1xuICAgICAgICAgICAgY29udGludWU7XG4gICAgICAgIH1cbiAgICAgICAgY29uc3QgcHJvamVjdElkID0gbGl2ZVNlc3Npb25Qcm9qZWN0SWQoc2Vzc2lvbiwgZXhwbGljaXRQcm9qZWN0cyk7XG4gICAgICAgIGlmICghcHJvamVjdElkKSB7XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCBhcnIgPSBieVByb2plY3QuZ2V0KHByb2plY3RJZCkgPz8gW107XG4gICAgICAgIGFyci5wdXNoKHNlc3Npb24pO1xuICAgICAgICBieVByb2plY3Quc2V0KHByb2plY3RJZCwgYXJyKTtcbiAgICB9XG4gICAgY29uc3Qgb3V0ID0ge307XG4gICAgZm9yIChjb25zdCBub2RlIG9mIHByb2plY3RzKSB7XG4gICAgICAgIGlmICghbm9kZS5wYXRoKSB7XG4gICAgICAgICAgICBjb250aW51ZTtcbiAgICAgICAgfVxuICAgICAgICBjb25zdCBsaXZlUm93cyA9IGJ5UHJvamVjdC5nZXQobm9kZS5pZCkgPz8gW107XG4gICAgICAgIGNvbnN0IGJhc2UgPSAobm9kZS5wcmV2aWV3U2Vzc2lvbnMgPz8gW10pLmZpbHRlcihzZXNzaW9uID0+ICFyZW1vdmVkLmhhcyhzZXNzaW9uLmlkKSk7XG4gICAgICAgIGlmICghbGl2ZVJvd3MubGVuZ3RoICYmICFiYXNlLmxlbmd0aCkge1xuICAgICAgICAgICAgY29udGludWU7XG4gICAgICAgIH1cbiAgICAgICAgLy8gTGl2ZSByb3dzIHRha2UgcHJlY2VkZW5jZSAoZnJlc2hlciB0aXRsZS9hY3Rpdml0eS93b3JraW5nIHN0YXRlKS5cbiAgICAgICAgY29uc3QgbWFwID0gbmV3IE1hcCgpO1xuICAgICAgICBmb3IgKGNvbnN0IHNlc3Npb24gb2YgWy4uLmxpdmVSb3dzLCAuLi5iYXNlXSkge1xuICAgICAgICAgICAgaWYgKCFtYXAuaGFzKHNlc3Npb24uaWQpKSB7XG4gICAgICAgICAgICAgICAgbWFwLnNldChzZXNzaW9uLmlkLCBzZXNzaW9uKTtcbiAgICAgICAgICAgIH1cbiAgICAgICAgfVxuICAgICAgICBvdXRbbm9kZS5wYXRoXSA9IFsuLi5tYXAudmFsdWVzKCldLnNvcnQoKGEsIGIpID0+IHNlc3Npb25SZWNlbmN5KGIpIC0gc2Vzc2lvblJlY2VuY3koYSkpLnNsaWNlKDAsIGxpbWl0KTtcbiAgICB9XG4gICAgcmV0dXJuIG91dDtcbn1cbiJdfQ==

@@ -1,0 +1,135 @@
+const useCallback = __vite__cjsImport1_react["useCallback"]; const useEffect = __vite__cjsImport1_react["useEffect"]; const useRef = __vite__cjsImport1_react["useRef"]; const useState = __vite__cjsImport1_react["useState"];import { useAuiState } from "/node_modules/.vite/deps/@assistant-ui_react.js?v=d550b4c6";
+import __vite__cjsImport1_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { useMediaQuery } from "/src/hooks/use-media-query.js";
+import { useResizeObserver } from "/src/hooks/use-resize-observer.js";
+import { $composerPoppedOut } from "/src/store/composer-popout.js";
+import { isSecondaryWindow } from "/src/store/windows.js";
+import { COMPOSER_SINGLE_LINE_MAX_PX, COMPOSER_STACK_BREAKPOINT_PX } from "/src/app/chat/composer/composer-utils.js";
+/**
+* Owns the composer's *sizing* engine: the stacked-vs-inline layout decision
+* and the measured-height CSS vars the thread reads for bottom clearance. All
+* work is edge-gated — the ResizeObserver only fires on real size changes, the
+* height vars are 8px-bucketed so per-keystroke growth never invalidates the
+* tree's computed style, and `tight` only flips when it crosses the breakpoint.
+* Returns `stacked` (the only value the render needs).
+*/
+export function useComposerMetrics({ composerRef, composerSurfaceRef, editorRef, poppedOut }) {
+	const [expanded, setExpanded] = useState(false);
+	const [tight, setTight] = useState(false);
+	const narrow = useMediaQuery("(max-width: 30rem)");
+	// Edge signals, not the live text: these only re-render when emptiness / the
+	// presence of a non-trailing newline actually flips, so typing within a line
+	// costs nothing here.
+	const isEmpty = useAuiState((s) => s.composer.text.length === 0);
+	const hasHardNewline = useAuiState((s) => s.composer.text.trimEnd().includes("\n"));
+	// Expansion (input on its own full-width row, controls below) is driven by
+	// the editor's *actual* rendered height via the ResizeObserver in
+	// syncComposerMetrics — it only fires when the text genuinely wraps to a
+	// second line, so the layout flips exactly at the wrap point rather than at
+	// a guessed character count. We only handle the two cases the observer
+	// can't: an explicit newline (expand before layout settles) and an emptied
+	// draft (collapse back). We never read scrollHeight per keystroke.
+	useEffect(() => {
+		if (isEmpty) {
+			setExpanded(false);
+			return;
+		}
+		if (expanded) {
+			return;
+		}
+		// Only a non-trailing newline forces an immediate expand. A trailing newline
+		// (or phantom \n from contenteditable junk) is left to the ResizeObserver,
+		// which expands only when the editor's real height actually grows.
+		if (hasHardNewline) {
+			setExpanded(true);
+		}
+	}, [
+		expanded,
+		hasHardNewline,
+		isEmpty
+	]);
+	// Bucket measured heights so we only invalidate the global CSS var when
+	// the size crosses a meaningful threshold. Without bucketing, the editor
+	// grows ~1px per character → setProperty fires every keystroke → entire
+	// tree's computed style is invalidated → next paint forces a full
+	// recalculate-style pass. With an 8px bucket, the invalidation rate drops
+	// ~8× and small char-by-char typing produces no style invalidation at all
+	// until a wrap or row change actually happens.
+	const lastBucketedHeightRef = useRef(0);
+	const lastBucketedSurfaceHeightRef = useRef(0);
+	const lastTightRef = useRef(null);
+	const syncComposerMetrics = useCallback(() => {
+		const composer = composerRef.current;
+		if (!composer) {
+			return;
+		}
+		// Floating composer is out of the thread's flow — it must not reserve any
+		// bottom clearance. Zero the measured vars so the thread reclaims the space.
+		// (Read globals here so the callback stays stable; mirror the popoutAllowed
+		// gate since secondary windows are forced docked.)
+		if ($composerPoppedOut.get() && !isSecondaryWindow()) {
+			const root = document.documentElement;
+			lastBucketedHeightRef.current = 0;
+			lastBucketedSurfaceHeightRef.current = 0;
+			root.style.setProperty("--composer-measured-height", "0px");
+			root.style.setProperty("--composer-surface-measured-height", "0px");
+			return;
+		}
+		const { height, width } = composer.getBoundingClientRect();
+		const surfaceHeight = composerSurfaceRef.current?.getBoundingClientRect().height;
+		const root = document.documentElement;
+		if (width > 0) {
+			const nextTight = width < COMPOSER_STACK_BREAKPOINT_PX;
+			if (nextTight !== lastTightRef.current) {
+				lastTightRef.current = nextTight;
+				setTight(nextTight);
+			}
+		}
+		// Expand once the input has actually wrapped past a single line. The
+		// observer only fires on real size changes, so this reads scrollHeight at
+		// most once per wrap (not per keystroke). One line ≈ 28px (1.625rem
+		// min-height + padding); a second line clears ~36px. We only ever expand
+		// here — collapse is handled by the emptied-draft effect to avoid
+		// oscillating across the wrap boundary as the input switches widths.
+		const editor = editorRef.current;
+		if (editor && editor.scrollHeight > COMPOSER_SINGLE_LINE_MAX_PX) {
+			setExpanded(true);
+		}
+		if (height > 0) {
+			const bucket = Math.round(height / 8) * 8;
+			if (bucket !== lastBucketedHeightRef.current) {
+				lastBucketedHeightRef.current = bucket;
+				root.style.setProperty("--composer-measured-height", `${bucket}px`);
+			}
+		}
+		if (surfaceHeight && surfaceHeight > 0) {
+			const bucket = Math.round(surfaceHeight / 8) * 8;
+			if (bucket !== lastBucketedSurfaceHeightRef.current) {
+				lastBucketedSurfaceHeightRef.current = bucket;
+				root.style.setProperty("--composer-surface-measured-height", `${bucket}px`);
+			}
+		}
+	}, [
+		composerRef,
+		composerSurfaceRef,
+		editorRef
+	]);
+	useResizeObserver(syncComposerMetrics, composerRef, composerSurfaceRef, editorRef);
+	// Toggling pop-out changes whether the composer reserves thread clearance.
+	// The ResizeObserver may not fire (the box can keep the same box size), so
+	// re-sync explicitly: docked republishes the measured height, floating zeroes
+	// it so the thread reclaims the bottom space.
+	useEffect(() => {
+		syncComposerMetrics();
+	}, [poppedOut, syncComposerMetrics]);
+	useEffect(() => {
+		return () => {
+			const root = document.documentElement;
+			root.style.removeProperty("--composer-measured-height");
+			root.style.removeProperty("--composer-surface-measured-height");
+		};
+	}, []);
+	return { stacked: expanded || narrow || tight };
+}
+
+//# sourceMappingURL=data:application/json;base64,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SyxNQUFNLGVBQWUsb0NBQW9DO0VBQ2xFO0NBQ0osR0FBRyxDQUFDLENBQUM7Q0FDTCxPQUFPLEVBQUUsU0FBUyxZQUFZLFVBQVUsTUFBTTtBQUNsRCIsIm5hbWVzIjpbXSwic291cmNlcyI6WyJ1c2UtY29tcG9zZXItbWV0cmljcy5qcyJdLCJ2ZXJzaW9uIjozLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyB1c2VBdWlTdGF0ZSB9IGZyb20gJ0Bhc3Npc3RhbnQtdWkvcmVhY3QnO1xuaW1wb3J0IHsgdXNlQ2FsbGJhY2ssIHVzZUVmZmVjdCwgdXNlUmVmLCB1c2VTdGF0ZSB9IGZyb20gJ3JlYWN0JztcbmltcG9ydCB7IHVzZU1lZGlhUXVlcnkgfSBmcm9tICdAL2hvb2tzL3VzZS1tZWRpYS1xdWVyeSc7XG5pbXBvcnQgeyB1c2VSZXNpemVPYnNlcnZlciB9IGZyb20gJ0AvaG9va3MvdXNlLXJlc2l6ZS1vYnNlcnZlcic7XG5pbXBvcnQgeyAkY29tcG9zZXJQb3BwZWRPdXQgfSBmcm9tICdAL3N0b3JlL2NvbXBvc2VyLXBvcG91dCc7XG5pbXBvcnQgeyBpc1NlY29uZGFyeVdpbmRvdyB9IGZyb20gJ0Avc3RvcmUvd2luZG93cyc7XG5pbXBvcnQgeyBDT01QT1NFUl9TSU5HTEVfTElORV9NQVhfUFgsIENPTVBPU0VSX1NUQUNLX0JSRUFLUE9JTlRfUFggfSBmcm9tICcuLi9jb21wb3Nlci11dGlscyc7XG4vKipcbiAqIE93bnMgdGhlIGNvbXBvc2VyJ3MgKnNpemluZyogZW5naW5lOiB0aGUgc3RhY2tlZC12cy1pbmxpbmUgbGF5b3V0IGRlY2lzaW9uXG4gKiBhbmQgdGhlIG1lYXN1cmVkLWhlaWdodCBDU1MgdmFycyB0aGUgdGhyZWFkIHJlYWRzIGZvciBib3R0b20gY2xlYXJhbmNlLiBBbGxcbiAqIHdvcmsgaXMgZWRnZS1nYXRlZCDigJQgdGhlIFJlc2l6ZU9ic2VydmVyIG9ubHkgZmlyZXMgb24gcmVhbCBzaXplIGNoYW5nZXMsIHRoZVxuICogaGVpZ2h0IHZhcnMgYXJlIDhweC1idWNrZXRlZCBzbyBwZXIta2V5c3Ryb2tlIGdyb3d0aCBuZXZlciBpbnZhbGlkYXRlcyB0aGVcbiAqIHRyZWUncyBjb21wdXRlZCBzdHlsZSwgYW5kIGB0aWdodGAgb25seSBmbGlwcyB3aGVuIGl0IGNyb3NzZXMgdGhlIGJyZWFrcG9pbnQuXG4gKiBSZXR1cm5zIGBzdGFja2VkYCAodGhlIG9ubHkgdmFsdWUgdGhlIHJlbmRlciBuZWVkcykuXG4gKi9cbmV4cG9ydCBmdW5jdGlvbiB1c2VDb21wb3Nlck1ldHJpY3MoeyBjb21wb3NlclJlZiwgY29tcG9zZXJTdXJmYWNlUmVmLCBlZGl0b3JSZWYsIHBvcHBlZE91dCB9KSB7XG4gICAgY29uc3QgW2V4cGFuZGVkLCBzZXRFeHBhbmRlZF0gPSB1c2VTdGF0ZShmYWxzZSk7XG4gICAgY29uc3QgW3RpZ2h0LCBzZXRUaWdodF0gPSB1c2VTdGF0ZShmYWxzZSk7XG4gICAgY29uc3QgbmFycm93ID0gdXNlTWVkaWFRdWVyeSgnKG1heC13aWR0aDogMzByZW0pJyk7XG4gICAgLy8gRWRnZSBzaWduYWxzLCBub3QgdGhlIGxpdmUgdGV4dDogdGhlc2Ugb25seSByZS1yZW5kZXIgd2hlbiBlbXB0aW5lc3MgLyB0aGVcbiAgICAvLyBwcmVzZW5jZSBvZiBhIG5vbi10cmFpbGluZyBuZXdsaW5lIGFjdHVhbGx5IGZsaXBzLCBzbyB0eXBpbmcgd2l0aGluIGEgbGluZVxuICAgIC8vIGNvc3RzIG5vdGhpbmcgaGVyZS5cbiAgICBjb25zdCBpc0VtcHR5ID0gdXNlQXVpU3RhdGUocyA9PiBzLmNvbXBvc2VyLnRleHQubGVuZ3RoID09PSAwKTtcbiAgICBjb25zdCBoYXNIYXJkTmV3bGluZSA9IHVzZUF1aVN0YXRlKHMgPT4gcy5jb21wb3Nlci50ZXh0LnRyaW1FbmQoKS5pbmNsdWRlcygnXFxuJykpO1xuICAgIC8vIEV4cGFuc2lvbiAoaW5wdXQgb24gaXRzIG93biBmdWxsLXdpZHRoIHJvdywgY29udHJvbHMgYmVsb3cpIGlzIGRyaXZlbiBieVxuICAgIC8vIHRoZSBlZGl0b3IncyAqYWN0dWFsKiByZW5kZXJlZCBoZWlnaHQgdmlhIHRoZSBSZXNpemVPYnNlcnZlciBpblxuICAgIC8vIHN5bmNDb21wb3Nlck1ldHJpY3Mg4oCUIGl0IG9ubHkgZmlyZXMgd2hlbiB0aGUgdGV4dCBnZW51aW5lbHkgd3JhcHMgdG8gYVxuICAgIC8vIHNlY29uZCBsaW5lLCBzbyB0aGUgbGF5b3V0IGZsaXBzIGV4YWN0bHkgYXQgdGhlIHdyYXAgcG9pbnQgcmF0aGVyIHRoYW4gYXRcbiAgICAvLyBhIGd1ZXNzZWQgY2hhcmFjdGVyIGNvdW50LiBXZSBvbmx5IGhhbmRsZSB0aGUgdHdvIGNhc2VzIHRoZSBvYnNlcnZlclxuICAgIC8vIGNhbid0OiBhbiBleHBsaWNpdCBuZXdsaW5lIChleHBhbmQgYmVmb3JlIGxheW91dCBzZXR0bGVzKSBhbmQgYW4gZW1wdGllZFxuICAgIC8vIGRyYWZ0IChjb2xsYXBzZSBiYWNrKS4gV2UgbmV2ZXIgcmVhZCBzY3JvbGxIZWlnaHQgcGVyIGtleXN0cm9rZS5cbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgICBpZiAoaXNFbXB0eSkge1xuICAgICAgICAgICAgc2V0RXhwYW5kZWQoZmFsc2UpO1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIGlmIChleHBhbmRlZCkge1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIC8vIE9ubHkgYSBub24tdHJhaWxpbmcgbmV3bGluZSBmb3JjZXMgYW4gaW1tZWRpYXRlIGV4cGFuZC4gQSB0cmFpbGluZyBuZXdsaW5lXG4gICAgICAgIC8vIChvciBwaGFudG9tIFxcbiBmcm9tIGNvbnRlbnRlZGl0YWJsZSBqdW5rKSBpcyBsZWZ0IHRvIHRoZSBSZXNpemVPYnNlcnZlcixcbiAgICAgICAgLy8gd2hpY2ggZXhwYW5kcyBvbmx5IHdoZW4gdGhlIGVkaXRvcidzIHJlYWwgaGVpZ2h0IGFjdHVhbGx5IGdyb3dzLlxuICAgICAgICBpZiAoaGFzSGFyZE5ld2xpbmUpIHtcbiAgICAgICAgICAgIHNldEV4cGFuZGVkKHRydWUpO1xuICAgICAgICB9XG4gICAgfSwgW2V4cGFuZGVkLCBoYXNIYXJkTmV3bGluZSwgaXNFbXB0eV0pO1xuICAgIC8vIEJ1Y2tldCBtZWFzdXJlZCBoZWlnaHRzIHNvIHdlIG9ubHkgaW52YWxpZGF0ZSB0aGUgZ2xvYmFsIENTUyB2YXIgd2hlblxuICAgIC8vIHRoZSBzaXplIGNyb3NzZXMgYSBtZWFuaW5nZnVsIHRocmVzaG9sZC4gV2l0aG91dCBidWNrZXRpbmcsIHRoZSBlZGl0b3JcbiAgICAvLyBncm93cyB+MXB4IHBlciBjaGFyYWN0ZXIg4oaSIHNldFByb3BlcnR5IGZpcmVzIGV2ZXJ5IGtleXN0cm9rZSDihpIgZW50aXJlXG4gICAgLy8gdHJlZSdzIGNvbXB1dGVkIHN0eWxlIGlzIGludmFsaWRhdGVkIOKGkiBuZXh0IHBhaW50IGZvcmNlcyBhIGZ1bGxcbiAgICAvLyByZWNhbGN1bGF0ZS1zdHlsZSBwYXNzLiBXaXRoIGFuIDhweCBidWNrZXQsIHRoZSBpbnZhbGlkYXRpb24gcmF0ZSBkcm9wc1xuICAgIC8vIH44w5cgYW5kIHNtYWxsIGNoYXItYnktY2hhciB0eXBpbmcgcHJvZHVjZXMgbm8gc3R5bGUgaW52YWxpZGF0aW9uIGF0IGFsbFxuICAgIC8vIHVudGlsIGEgd3JhcCBvciByb3cgY2hhbmdlIGFjdHVhbGx5IGhhcHBlbnMuXG4gICAgY29uc3QgbGFzdEJ1Y2tldGVkSGVpZ2h0UmVmID0gdXNlUmVmKDApO1xuICAgIGNvbnN0IGxhc3RCdWNrZXRlZFN1cmZhY2VIZWlnaHRSZWYgPSB1c2VSZWYoMCk7XG4gICAgY29uc3QgbGFzdFRpZ2h0UmVmID0gdXNlUmVmKG51bGwpO1xuICAgIGNvbnN0IHN5bmNDb21wb3Nlck1ldHJpY3MgPSB1c2VDYWxsYmFjaygoKSA9PiB7XG4gICAgICAgIGNvbnN0IGNvbXBvc2VyID0gY29tcG9zZXJSZWYuY3VycmVudDtcbiAgICAgICAgaWYgKCFjb21wb3Nlcikge1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIC8vIEZsb2F0aW5nIGNvbXBvc2VyIGlzIG91dCBvZiB0aGUgdGhyZWFkJ3MgZmxvdyDigJQgaXQgbXVzdCBub3QgcmVzZXJ2ZSBhbnlcbiAgICAgICAgLy8gYm90dG9tIGNsZWFyYW5jZS4gWmVybyB0aGUgbWVhc3VyZWQgdmFycyBzbyB0aGUgdGhyZWFkIHJlY2xhaW1zIHRoZSBzcGFjZS5cbiAgICAgICAgLy8gKFJlYWQgZ2xvYmFscyBoZXJlIHNvIHRoZSBjYWxsYmFjayBzdGF5cyBzdGFibGU7IG1pcnJvciB0aGUgcG9wb3V0QWxsb3dlZFxuICAgICAgICAvLyBnYXRlIHNpbmNlIHNlY29uZGFyeSB3aW5kb3dzIGFyZSBmb3JjZWQgZG9ja2VkLilcbiAgICAgICAgaWYgKCRjb21wb3NlclBvcHBlZE91dC5nZXQoKSAmJiAhaXNTZWNvbmRhcnlXaW5kb3coKSkge1xuICAgICAgICAgICAgY29uc3Qgcm9vdCA9IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudDtcbiAgICAgICAgICAgIGxhc3RCdWNrZXRlZEhlaWdodFJlZi5jdXJyZW50ID0gMDtcbiAgICAgICAgICAgIGxhc3RCdWNrZXRlZFN1cmZhY2VIZWlnaHRSZWYuY3VycmVudCA9IDA7XG4gICAgICAgICAgICByb290LnN0eWxlLnNldFByb3BlcnR5KCctLWNvbXBvc2VyLW1lYXN1cmVkLWhlaWdodCcsICcwcHgnKTtcbiAgICAgICAgICAgIHJvb3Quc3R5bGUuc2V0UHJvcGVydHkoJy0tY29tcG9zZXItc3VyZmFjZS1tZWFzdXJlZC1oZWlnaHQnLCAnMHB4Jyk7XG4gICAgICAgICAgICByZXR1cm47XG4gICAgICAgIH1cbiAgICAgICAgY29uc3QgeyBoZWlnaHQsIHdpZHRoIH0gPSBjb21wb3Nlci5nZXRCb3VuZGluZ0NsaWVudFJlY3QoKTtcbiAgICAgICAgY29uc3Qgc3VyZmFjZUhlaWdodCA9IGNvbXBvc2VyU3VyZmFjZVJlZi5jdXJyZW50Py5nZXRCb3VuZGluZ0NsaWVudFJlY3QoKS5oZWlnaHQ7XG4gICAgICAgIGNvbnN0IHJvb3QgPSBkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQ7XG4gICAgICAgIGlmICh3aWR0aCA+IDApIHtcbiAgICAgICAgICAgIGNvbnN0IG5leHRUaWdodCA9IHdpZHRoIDwgQ09NUE9TRVJfU1RBQ0tfQlJFQUtQT0lOVF9QWDtcbiAgICAgICAgICAgIGlmIChuZXh0VGlnaHQgIT09IGxhc3RUaWdodFJlZi5jdXJyZW50KSB7XG4gICAgICAgICAgICAgICAgbGFzdFRpZ2h0UmVmLmN1cnJlbnQgPSBuZXh0VGlnaHQ7XG4gICAgICAgICAgICAgICAgc2V0VGlnaHQobmV4dFRpZ2h0KTtcbiAgICAgICAgICAgIH1cbiAgICAgICAgfVxuICAgICAgICAvLyBFeHBhbmQgb25jZSB0aGUgaW5wdXQgaGFzIGFjdHVhbGx5IHdyYXBwZWQgcGFzdCBhIHNpbmdsZSBsaW5lLiBUaGVcbiAgICAgICAgLy8gb2JzZXJ2ZXIgb25seSBmaXJlcyBvbiByZWFsIHNpemUgY2hhbmdlcywgc28gdGhpcyByZWFkcyBzY3JvbGxIZWlnaHQgYXRcbiAgICAgICAgLy8gbW9zdCBvbmNlIHBlciB3cmFwIChub3QgcGVyIGtleXN0cm9rZSkuIE9uZSBsaW5lIOKJiCAyOHB4ICgxLjYyNXJlbVxuICAgICAgICAvLyBtaW4taGVpZ2h0ICsgcGFkZGluZyk7IGEgc2Vjb25kIGxpbmUgY2xlYXJzIH4zNnB4LiBXZSBvbmx5IGV2ZXIgZXhwYW5kXG4gICAgICAgIC8vIGhlcmUg4oCUIGNvbGxhcHNlIGlzIGhhbmRsZWQgYnkgdGhlIGVtcHRpZWQtZHJhZnQgZWZmZWN0IHRvIGF2b2lkXG4gICAgICAgIC8vIG9zY2lsbGF0aW5nIGFjcm9zcyB0aGUgd3JhcCBib3VuZGFyeSBhcyB0aGUgaW5wdXQgc3dpdGNoZXMgd2lkdGhzLlxuICAgICAgICBjb25zdCBlZGl0b3IgPSBlZGl0b3JSZWYuY3VycmVudDtcbiAgICAgICAgaWYgKGVkaXRvciAmJiBlZGl0b3Iuc2Nyb2xsSGVpZ2h0ID4gQ09NUE9TRVJfU0lOR0xFX0xJTkVfTUFYX1BYKSB7XG4gICAgICAgICAgICBzZXRFeHBhbmRlZCh0cnVlKTtcbiAgICAgICAgfVxuICAgICAgICBpZiAoaGVpZ2h0ID4gMCkge1xuICAgICAgICAgICAgY29uc3QgYnVja2V0ID0gTWF0aC5yb3VuZChoZWlnaHQgLyA4KSAqIDg7XG4gICAgICAgICAgICBpZiAoYnVja2V0ICE9PSBsYXN0QnVja2V0ZWRIZWlnaHRSZWYuY3VycmVudCkge1xuICAgICAgICAgICAgICAgIGxhc3RCdWNrZXRlZEhlaWdodFJlZi5jdXJyZW50ID0gYnVja2V0O1xuICAgICAgICAgICAgICAgIHJvb3Quc3R5bGUuc2V0UHJvcGVydHkoJy0tY29tcG9zZXItbWVhc3VyZWQtaGVpZ2h0JywgYCR7YnVja2V0fXB4YCk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH1cbiAgICAgICAgaWYgKHN1cmZhY2VIZWlnaHQgJiYgc3VyZmFjZUhlaWdodCA+IDApIHtcbiAgICAgICAgICAgIGNvbnN0IGJ1Y2tldCA9IE1hdGgucm91bmQoc3VyZmFjZUhlaWdodCAvIDgpICogODtcbiAgICAgICAgICAgIGlmIChidWNrZXQgIT09IGxhc3RCdWNrZXRlZFN1cmZhY2VIZWlnaHRSZWYuY3VycmVudCkge1xuICAgICAgICAgICAgICAgIGxhc3RCdWNrZXRlZFN1cmZhY2VIZWlnaHRSZWYuY3VycmVudCA9IGJ1Y2tldDtcbiAgICAgICAgICAgICAgICByb290LnN0eWxlLnNldFByb3BlcnR5KCctLWNvbXBvc2VyLXN1cmZhY2UtbWVhc3VyZWQtaGVpZ2h0JywgYCR7YnVja2V0fXB4YCk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH1cbiAgICB9LCBbY29tcG9zZXJSZWYsIGNvbXBvc2VyU3VyZmFjZVJlZiwgZWRpdG9yUmVmXSk7XG4gICAgdXNlUmVzaXplT2JzZXJ2ZXIoc3luY0NvbXBvc2VyTWV0cmljcywgY29tcG9zZXJSZWYsIGNvbXBvc2VyU3VyZmFjZVJlZiwgZWRpdG9yUmVmKTtcbiAgICAvLyBUb2dnbGluZyBwb3Atb3V0IGNoYW5nZXMgd2hldGhlciB0aGUgY29tcG9zZXIgcmVzZXJ2ZXMgdGhyZWFkIGNsZWFyYW5jZS5cbiAgICAvLyBUaGUgUmVzaXplT2JzZXJ2ZXIgbWF5IG5vdCBmaXJlICh0aGUgYm94IGNhbiBrZWVwIHRoZSBzYW1lIGJveCBzaXplKSwgc29cbiAgICAvLyByZS1zeW5jIGV4cGxpY2l0bHk6IGRvY2tlZCByZXB1Ymxpc2hlcyB0aGUgbWVhc3VyZWQgaGVpZ2h0LCBmbG9hdGluZyB6ZXJvZXNcbiAgICAvLyBpdCBzbyB0aGUgdGhyZWFkIHJlY2xhaW1zIHRoZSBib3R0b20gc3BhY2UuXG4gICAgdXNlRWZmZWN0KCgpID0+IHtcbiAgICAgICAgc3luY0NvbXBvc2VyTWV0cmljcygpO1xuICAgIH0sIFtwb3BwZWRPdXQsIHN5bmNDb21wb3Nlck1ldHJpY3NdKTtcbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgICByZXR1cm4gKCkgPT4ge1xuICAgICAgICAgICAgY29uc3Qgcm9vdCA9IGRvY3VtZW50LmRvY3VtZW50RWxlbWVudDtcbiAgICAgICAgICAgIHJvb3Quc3R5bGUucmVtb3ZlUHJvcGVydHkoJy0tY29tcG9zZXItbWVhc3VyZWQtaGVpZ2h0Jyk7XG4gICAgICAgICAgICByb290LnN0eWxlLnJlbW92ZVByb3BlcnR5KCctLWNvbXBvc2VyLXN1cmZhY2UtbWVhc3VyZWQtaGVpZ2h0Jyk7XG4gICAgICAgIH07XG4gICAgfSwgW10pO1xuICAgIHJldHVybiB7IHN0YWNrZWQ6IGV4cGFuZGVkIHx8IG5hcnJvdyB8fCB0aWdodCB9O1xufVxuIl19

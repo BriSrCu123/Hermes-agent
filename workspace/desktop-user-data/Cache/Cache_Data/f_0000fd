@@ -1,0 +1,190 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/app/right-sidebar/file-actions.js");const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"]; const _Fragment = __vite__cjsImport0_react_jsxRuntime["Fragment"]; const _jsxs = __vite__cjsImport0_react_jsxRuntime["jsxs"];const useRef = __vite__cjsImport2_react["useRef"]; const useState = __vite__cjsImport2_react["useState"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import { useStore } from "/node_modules/.vite/deps/@nanostores_react.js?v=d550b4c6";
+import __vite__cjsImport2_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { ConfirmDialog } from "/src/components/ui/confirm-dialog.js";
+import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "/src/components/ui/context-menu.js";
+import { translateNow, useI18n } from "/src/i18n/index.js";
+import { isDesktopFsRemoteMode } from "/src/lib/desktop-fs.js";
+import { IS_MAC } from "/src/lib/keybinds/combo.js";
+import { cn } from "/src/lib/utils.js";
+import { $fileActionDialog, beginInlineRename, cancelInlineRename, closeFileActionDialog, copyFilePath, executeFileDelete, executeFileRename, requestFileDelete, revealFile, toRelativePath } from "/src/store/file-actions.js";
+import { notifyError } from "/src/store/notifications.js";
+var _s = $RefreshSig$(), _s2 = $RefreshSig$(), _s3 = $RefreshSig$();
+const IS_WIN = typeof navigator !== "undefined" && /win/i.test(navigator.platform || navigator.userAgent || "");
+// F2 starts a rename anywhere; Enter starts one when a row is focused (VS Code).
+export function isRenameShortcut(event) {
+	return event.key === "F2" || event.key === "Enter";
+}
+/** The platform-appropriate "reveal in file manager" label (Finder / Explorer
+*  / containing folder). Shared so every file menu reads consistently. */
+export function pickRevealLabel(finder, explorer, fileManager) {
+	return IS_MAC ? finder : IS_WIN ? explorer : fileManager;
+}
+/** Right-click menu shared by both file trees (browser + review/git). */
+export function FileEntryContextMenu({ children, isDirectory, name, path, relativeTo }) {
+	_s();
+	const { t } = useI18n();
+	const m = t.fileMenu;
+	// Reveal / rename / delete need the local filesystem; hide them on a remote
+	// backend (copy-path still works everywhere).
+	const localFs = !isDesktopFsRemoteMode();
+	const target = {
+		isDirectory,
+		name,
+		path
+	};
+	const revealLabel = pickRevealLabel(m.revealFinder, m.revealExplorer, m.revealFileManager);
+	return _jsxs(ContextMenu, { children: [_jsx(ContextMenuTrigger, {
+		asChild: true,
+		children
+	}), _jsxs(ContextMenuContent, {
+		onCloseAutoFocus: (event) => event.preventDefault(),
+		children: [
+			localFs && _jsxs(_Fragment, { children: [_jsx(ContextMenuItem, {
+				onSelect: () => void revealFile(path),
+				children: revealLabel
+			}), _jsx(ContextMenuSeparator, {})] }),
+			_jsx(ContextMenuItem, {
+				onSelect: () => void copyFilePath(path),
+				children: m.copyPath
+			}),
+			relativeTo && _jsx(ContextMenuItem, {
+				onSelect: () => void copyFilePath(toRelativePath(path, relativeTo)),
+				children: m.copyRelativePath
+			}),
+			localFs && _jsxs(_Fragment, { children: [
+				_jsx(ContextMenuSeparator, {}),
+				_jsx(ContextMenuItem, {
+					onSelect: () => beginInlineRename(path),
+					children: m.rename
+				}),
+				_jsx(ContextMenuItem, {
+					onSelect: () => requestFileDelete(target),
+					variant: "destructive",
+					children: m.delete
+				})
+			] })
+		]
+	})] });
+}
+_s(FileEntryContextMenu, "82N5KF9nLzZ6+2WH7KIjzIXRkLw=", false, function() {
+	return [useI18n];
+});
+_c = FileEntryContextMenu;
+/** Mounted once near the app root: the delete confirm dialog for shared file
+*  actions. Rename is inline (see {@link InlineRenameInput}). */
+export function FileActionDialogs() {
+	_s2();
+	const { t } = useI18n();
+	const dialog = useStore($fileActionDialog);
+	const deleting = dialog?.kind === "delete";
+	return _jsx(ConfirmDialog, {
+		confirmLabel: t.fileMenu.delete,
+		description: t.fileMenu.deleteBody,
+		destructive: true,
+		onClose: closeFileActionDialog,
+		onConfirm: () => {
+			if (deleting) {
+				return executeFileDelete(dialog.path);
+			}
+		},
+		open: deleting,
+		title: deleting ? t.fileMenu.deleteTitle(dialog.name) : ""
+	});
+}
+_s2(FileActionDialogs, "ehG+lTOas99rUuYXxx0GRS3Cyig=", false, function() {
+	return [useI18n, useStore];
+});
+_c2 = FileActionDialogs;
+/** The in-row rename editor (VS Code style): seeded with the name (stem
+*  pre-selected), commits on Enter/blur, cancels on Esc. Render it in place of a
+*  row's label when `$renamingPath === path`. */
+export function InlineRenameInput({ className, name, path }) {
+	_s3();
+	const [value, setValue] = useState(name);
+	// Enter then the resulting blur must not both commit; latch on first finish.
+	const done = useRef(false);
+	// Focus churn right after mount (context-menu close, arborist refocus, the
+	// fall-through click on the row) would blur→commit→cancel instantly; ignore
+	// blurs in this window and grab focus back instead.
+	const mountedAt = useRef(Date.now());
+	const finish = async (commit) => {
+		if (done.current) {
+			return;
+		}
+		done.current = true;
+		const next = value.trim();
+		if (commit && next && next !== name) {
+			try {
+				await executeFileRename(path, next);
+			} catch (error) {
+				notifyError(error, translateNow("errors.genericFailure"));
+			}
+		}
+		cancelInlineRename();
+	};
+	return _jsx("input", {
+		"aria-label": translateNow("fileMenu.renameLabel"),
+		autoCapitalize: "off",
+		autoComplete: "off",
+		autoCorrect: "off",
+		autoFocus: true,
+		className: cn("min-w-0 flex-1 rounded-sm border border-[color-mix(in_srgb,var(--dt-composer-ring)_55%,transparent)] bg-(--ui-bg-elevated) px-1 py-0 text-xs text-foreground outline-none", className),
+		onBlur: (event) => {
+			if (Date.now() - mountedAt.current < 250) {
+				event.currentTarget.focus();
+				return;
+			}
+			void finish(true);
+		},
+		onChange: (event) => setValue(event.target.value),
+		onClick: (event) => event.stopPropagation(),
+		onDoubleClick: (event) => event.stopPropagation(),
+		onFocus: (event) => {
+			const dot = event.currentTarget.value.lastIndexOf(".");
+			event.currentTarget.setSelectionRange(0, dot > 0 ? dot : event.currentTarget.value.length);
+		},
+		onKeyDown: (event) => {
+			event.stopPropagation();
+			if (event.key === "Enter") {
+				event.preventDefault();
+				void finish(true);
+			} else if (event.key === "Escape") {
+				event.preventDefault();
+				void finish(false);
+			}
+		},
+		spellCheck: false,
+		value
+	});
+}
+_s3(InlineRenameInput, "irP/bkmBavFtsyeN9tcDiYC4GHk=");
+_c3 = InlineRenameInput;
+var _c, _c2, _c3;
+$RefreshReg$(_c, "FileEntryContextMenu");
+$RefreshReg$(_c2, "FileActionDialogs");
+$RefreshReg$(_c3, "InlineRenameInput");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/app/right-sidebar/file-actions.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/right-sidebar/file-actions.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/right-sidebar/file-actions.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/right-sidebar/file-actions.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,eyJtYXBwaW5ncyI6IkFBQUEsU0FBUyxPQUFPLE1BQU0sWUFBWSxXQUFXLFFBQVEsYUFBYTtBQUNsRSxTQUFTLGdCQUFnQjtBQUN6QixTQUFTLFFBQVEsZ0JBQWdCO0FBQ2pDLFNBQVMscUJBQXFCO0FBQzlCLFNBQVMsYUFBYSxvQkFBb0IsaUJBQWlCLHNCQUFzQiwwQkFBMEI7QUFDM0csU0FBUyxjQUFjLGVBQWU7QUFDdEMsU0FBUyw2QkFBNkI7QUFDdEMsU0FBUyxjQUFjO0FBQ3ZCLFNBQVMsVUFBVTtBQUNuQixTQUFTLG1CQUFtQixtQkFBbUIsb0JBQW9CLHVCQUF1QixjQUFjLG1CQUFtQixtQkFBbUIsbUJBQW1CLFlBQVksc0JBQXNCO0FBQ25NLFNBQVMsbUJBQW1COztBQUM1QixNQUFNLFNBQVMsT0FBTyxjQUFjLGVBQWUsT0FBTyxLQUFLLFVBQVUsWUFBWSxVQUFVLGFBQWEsRUFBRTs7QUFFOUcsT0FBTyxTQUFTLGlCQUFpQixPQUFPO0NBQ3BDLE9BQU8sTUFBTSxRQUFRLFFBQVEsTUFBTSxRQUFRO0FBQy9DOzs7QUFHQSxPQUFPLFNBQVMsZ0JBQWdCLFFBQVEsVUFBVSxhQUFhO0NBQzNELE9BQU8sU0FBUyxTQUFTLFNBQVMsV0FBVztBQUNqRDs7QUFFQSxPQUFPLFNBQVMscUJBQXFCLEVBQUUsVUFBVSxhQUFhLE1BQU0sTUFBTSxjQUFjOztDQUNwRixNQUFNLEVBQUUsTUFBTSxRQUFRO0NBQ3RCLE1BQU0sSUFBSSxFQUFFOzs7Q0FHWixNQUFNLFVBQVUsQ0FBQyxzQkFBc0I7Q0FDdkMsTUFBTSxTQUFTO0VBQUU7RUFBYTtFQUFNO0NBQUs7Q0FDekMsTUFBTSxjQUFjLGdCQUFnQixFQUFFLGNBQWMsRUFBRSxnQkFBZ0IsRUFBRSxpQkFBaUI7Q0FDekYsT0FBUSxNQUFNLGFBQWEsRUFBRSxVQUFVLENBQUMsS0FBSyxvQkFBb0I7RUFBRSxTQUFTO0VBQWdCO0NBQVMsQ0FBQyxHQUFHLE1BQU0sb0JBQW9CO0VBQUUsbUJBQWtCLFVBQVMsTUFBTSxlQUFlO0VBQUcsVUFBVTtHQUFDLFdBQVksTUFBTSxXQUFXLEVBQUUsVUFBVSxDQUFDLEtBQUssaUJBQWlCO0lBQUUsZ0JBQWdCLEtBQUssV0FBVyxJQUFJO0lBQUcsVUFBVTtHQUFZLENBQUMsR0FBRyxLQUFLLHNCQUFzQixDQUFDLENBQUMsQ0FBQyxFQUFFLENBQUM7R0FBSSxLQUFLLGlCQUFpQjtJQUFFLGdCQUFnQixLQUFLLGFBQWEsSUFBSTtJQUFHLFVBQVUsRUFBRTtHQUFTLENBQUM7R0FBRyxjQUFlLEtBQUssaUJBQWlCO0lBQUUsZ0JBQWdCLEtBQUssYUFBYSxlQUFlLE1BQU0sVUFBVSxDQUFDO0lBQUcsVUFBVSxFQUFFO0dBQWlCLENBQUM7R0FBSSxXQUFZLE1BQU0sV0FBVyxFQUFFLFVBQVU7SUFBQyxLQUFLLHNCQUFzQixDQUFDLENBQUM7SUFBRyxLQUFLLGlCQUFpQjtLQUFFLGdCQUFnQixrQkFBa0IsSUFBSTtLQUFHLFVBQVUsRUFBRTtJQUFPLENBQUM7SUFBRyxLQUFLLGlCQUFpQjtLQUFFLGdCQUFnQixrQkFBa0IsTUFBTTtLQUFHLFNBQVM7S0FBZSxVQUFVLEVBQUU7SUFBTyxDQUFDO0dBQUMsRUFBRSxDQUFDO0VBQUU7Q0FBRSxDQUFDLENBQUMsRUFBRSxDQUFDO0FBQ3IzQjs7Ozs7OztBQUdBLE9BQU8sU0FBUyxvQkFBb0I7O0NBQ2hDLE1BQU0sRUFBRSxNQUFNLFFBQVE7Q0FDdEIsTUFBTSxTQUFTLFNBQVMsaUJBQWlCO0NBQ3pDLE1BQU0sV0FBVyxRQUFRLFNBQVM7Q0FDbEMsT0FBUSxLQUFLLGVBQWU7RUFBRSxjQUFjLEVBQUUsU0FBUztFQUFRLGFBQWEsRUFBRSxTQUFTO0VBQVksYUFBYTtFQUFNLFNBQVM7RUFBdUIsaUJBQWlCO0dBQy9KLElBQUksVUFBVTtJQUNWLE9BQU8sa0JBQWtCLE9BQU8sSUFBSTtHQUN4QztFQUNKO0VBQUcsTUFBTTtFQUFVLE9BQU8sV0FBVyxFQUFFLFNBQVMsWUFBWSxPQUFPLElBQUksSUFBSTtDQUFHLENBQUM7QUFDdkY7Ozs7Ozs7O0FBSUEsT0FBTyxTQUFTLGtCQUFrQixFQUFFLFdBQVcsTUFBTSxRQUFROztDQUN6RCxNQUFNLENBQUMsT0FBTyxZQUFZLFNBQVMsSUFBSTs7Q0FFdkMsTUFBTSxPQUFPLE9BQU8sS0FBSzs7OztDQUl6QixNQUFNLFlBQVksT0FBTyxLQUFLLElBQUksQ0FBQztDQUNuQyxNQUFNLFNBQVMsT0FBTyxXQUFXO0VBQzdCLElBQUksS0FBSyxTQUFTO0dBQ2Q7RUFDSjtFQUNBLEtBQUssVUFBVTtFQUNmLE1BQU0sT0FBTyxNQUFNLEtBQUs7RUFDeEIsSUFBSSxVQUFVLFFBQVEsU0FBUyxNQUFNO0dBQ2pDLElBQUk7SUFDQSxNQUFNLGtCQUFrQixNQUFNLElBQUk7R0FDdEMsU0FDTyxPQUFPO0lBQ1YsWUFBWSxPQUFPLGFBQWEsdUJBQXVCLENBQUM7R0FDNUQ7RUFDSjtFQUNBLG1CQUFtQjtDQUN2QjtDQUNBLE9BQVEsS0FBSyxTQUFTO0VBQUUsY0FBYyxhQUFhLHNCQUFzQjtFQUFHLGdCQUFnQjtFQUFPLGNBQWM7RUFBTyxhQUFhO0VBQU8sV0FBVztFQUFNLFdBQVcsR0FBRyw2S0FBNkssU0FBUztFQUFHLFNBQVEsVUFBUztHQUM3VyxJQUFJLEtBQUssSUFBSSxJQUFJLFVBQVUsVUFBVSxLQUFLO0lBQ3RDLE1BQU0sY0FBYyxNQUFNO0lBQzFCO0dBQ0o7R0FDQSxLQUFLLE9BQU8sSUFBSTtFQUNwQjtFQUFHLFdBQVUsVUFBUyxTQUFTLE1BQU0sT0FBTyxLQUFLO0VBQUcsVUFBUyxVQUFTLE1BQU0sZ0JBQWdCO0VBQUcsZ0JBQWUsVUFBUyxNQUFNLGdCQUFnQjtFQUFHLFVBQVMsVUFBUztHQUM5SixNQUFNLE1BQU0sTUFBTSxjQUFjLE1BQU0sWUFBWSxHQUFHO0dBQ3JELE1BQU0sY0FBYyxrQkFBa0IsR0FBRyxNQUFNLElBQUksTUFBTSxNQUFNLGNBQWMsTUFBTSxNQUFNO0VBQzdGO0VBQUcsWUFBVyxVQUFTO0dBQ25CLE1BQU0sZ0JBQWdCO0dBQ3RCLElBQUksTUFBTSxRQUFRLFNBQVM7SUFDdkIsTUFBTSxlQUFlO0lBQ3JCLEtBQUssT0FBTyxJQUFJO0dBQ3BCLE9BQ0ssSUFBSSxNQUFNLFFBQVEsVUFBVTtJQUM3QixNQUFNLGVBQWU7SUFDckIsS0FBSyxPQUFPLEtBQUs7R0FDckI7RUFDSjtFQUFHLFlBQVk7RUFBYztDQUFNLENBQUM7QUFDNUMiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsiZmlsZS1hY3Rpb25zLmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGpzeCBhcyBfanN4LCBGcmFnbWVudCBhcyBfRnJhZ21lbnQsIGpzeHMgYXMgX2pzeHMgfSBmcm9tIFwicmVhY3QvanN4LXJ1bnRpbWVcIjtcbmltcG9ydCB7IHVzZVN0b3JlIH0gZnJvbSAnQG5hbm9zdG9yZXMvcmVhY3QnO1xuaW1wb3J0IHsgdXNlUmVmLCB1c2VTdGF0ZSB9IGZyb20gJ3JlYWN0JztcbmltcG9ydCB7IENvbmZpcm1EaWFsb2cgfSBmcm9tICdAL2NvbXBvbmVudHMvdWkvY29uZmlybS1kaWFsb2cnO1xuaW1wb3J0IHsgQ29udGV4dE1lbnUsIENvbnRleHRNZW51Q29udGVudCwgQ29udGV4dE1lbnVJdGVtLCBDb250ZXh0TWVudVNlcGFyYXRvciwgQ29udGV4dE1lbnVUcmlnZ2VyIH0gZnJvbSAnQC9jb21wb25lbnRzL3VpL2NvbnRleHQtbWVudSc7XG5pbXBvcnQgeyB0cmFuc2xhdGVOb3csIHVzZUkxOG4gfSBmcm9tICdAL2kxOG4nO1xuaW1wb3J0IHsgaXNEZXNrdG9wRnNSZW1vdGVNb2RlIH0gZnJvbSAnQC9saWIvZGVza3RvcC1mcyc7XG5pbXBvcnQgeyBJU19NQUMgfSBmcm9tICdAL2xpYi9rZXliaW5kcy9jb21ibyc7XG5pbXBvcnQgeyBjbiB9IGZyb20gJ0AvbGliL3V0aWxzJztcbmltcG9ydCB7ICRmaWxlQWN0aW9uRGlhbG9nLCBiZWdpbklubGluZVJlbmFtZSwgY2FuY2VsSW5saW5lUmVuYW1lLCBjbG9zZUZpbGVBY3Rpb25EaWFsb2csIGNvcHlGaWxlUGF0aCwgZXhlY3V0ZUZpbGVEZWxldGUsIGV4ZWN1dGVGaWxlUmVuYW1lLCByZXF1ZXN0RmlsZURlbGV0ZSwgcmV2ZWFsRmlsZSwgdG9SZWxhdGl2ZVBhdGggfSBmcm9tICdAL3N0b3JlL2ZpbGUtYWN0aW9ucyc7XG5pbXBvcnQgeyBub3RpZnlFcnJvciB9IGZyb20gJ0Avc3RvcmUvbm90aWZpY2F0aW9ucyc7XG5jb25zdCBJU19XSU4gPSB0eXBlb2YgbmF2aWdhdG9yICE9PSAndW5kZWZpbmVkJyAmJiAvd2luL2kudGVzdChuYXZpZ2F0b3IucGxhdGZvcm0gfHwgbmF2aWdhdG9yLnVzZXJBZ2VudCB8fCAnJyk7XG4vLyBGMiBzdGFydHMgYSByZW5hbWUgYW55d2hlcmU7IEVudGVyIHN0YXJ0cyBvbmUgd2hlbiBhIHJvdyBpcyBmb2N1c2VkIChWUyBDb2RlKS5cbmV4cG9ydCBmdW5jdGlvbiBpc1JlbmFtZVNob3J0Y3V0KGV2ZW50KSB7XG4gICAgcmV0dXJuIGV2ZW50LmtleSA9PT0gJ0YyJyB8fCBldmVudC5rZXkgPT09ICdFbnRlcic7XG59XG4vKiogVGhlIHBsYXRmb3JtLWFwcHJvcHJpYXRlIFwicmV2ZWFsIGluIGZpbGUgbWFuYWdlclwiIGxhYmVsIChGaW5kZXIgLyBFeHBsb3JlclxuICogIC8gY29udGFpbmluZyBmb2xkZXIpLiBTaGFyZWQgc28gZXZlcnkgZmlsZSBtZW51IHJlYWRzIGNvbnNpc3RlbnRseS4gKi9cbmV4cG9ydCBmdW5jdGlvbiBwaWNrUmV2ZWFsTGFiZWwoZmluZGVyLCBleHBsb3JlciwgZmlsZU1hbmFnZXIpIHtcbiAgICByZXR1cm4gSVNfTUFDID8gZmluZGVyIDogSVNfV0lOID8gZXhwbG9yZXIgOiBmaWxlTWFuYWdlcjtcbn1cbi8qKiBSaWdodC1jbGljayBtZW51IHNoYXJlZCBieSBib3RoIGZpbGUgdHJlZXMgKGJyb3dzZXIgKyByZXZpZXcvZ2l0KS4gKi9cbmV4cG9ydCBmdW5jdGlvbiBGaWxlRW50cnlDb250ZXh0TWVudSh7IGNoaWxkcmVuLCBpc0RpcmVjdG9yeSwgbmFtZSwgcGF0aCwgcmVsYXRpdmVUbyB9KSB7XG4gICAgY29uc3QgeyB0IH0gPSB1c2VJMThuKCk7XG4gICAgY29uc3QgbSA9IHQuZmlsZU1lbnU7XG4gICAgLy8gUmV2ZWFsIC8gcmVuYW1lIC8gZGVsZXRlIG5lZWQgdGhlIGxvY2FsIGZpbGVzeXN0ZW07IGhpZGUgdGhlbSBvbiBhIHJlbW90ZVxuICAgIC8vIGJhY2tlbmQgKGNvcHktcGF0aCBzdGlsbCB3b3JrcyBldmVyeXdoZXJlKS5cbiAgICBjb25zdCBsb2NhbEZzID0gIWlzRGVza3RvcEZzUmVtb3RlTW9kZSgpO1xuICAgIGNvbnN0IHRhcmdldCA9IHsgaXNEaXJlY3RvcnksIG5hbWUsIHBhdGggfTtcbiAgICBjb25zdCByZXZlYWxMYWJlbCA9IHBpY2tSZXZlYWxMYWJlbChtLnJldmVhbEZpbmRlciwgbS5yZXZlYWxFeHBsb3JlciwgbS5yZXZlYWxGaWxlTWFuYWdlcik7XG4gICAgcmV0dXJuIChfanN4cyhDb250ZXh0TWVudSwgeyBjaGlsZHJlbjogW19qc3goQ29udGV4dE1lbnVUcmlnZ2VyLCB7IGFzQ2hpbGQ6IHRydWUsIGNoaWxkcmVuOiBjaGlsZHJlbiB9KSwgX2pzeHMoQ29udGV4dE1lbnVDb250ZW50LCB7IG9uQ2xvc2VBdXRvRm9jdXM6IGV2ZW50ID0+IGV2ZW50LnByZXZlbnREZWZhdWx0KCksIGNoaWxkcmVuOiBbbG9jYWxGcyAmJiAoX2pzeHMoX0ZyYWdtZW50LCB7IGNoaWxkcmVuOiBbX2pzeChDb250ZXh0TWVudUl0ZW0sIHsgb25TZWxlY3Q6ICgpID0+IHZvaWQgcmV2ZWFsRmlsZShwYXRoKSwgY2hpbGRyZW46IHJldmVhbExhYmVsIH0pLCBfanN4KENvbnRleHRNZW51U2VwYXJhdG9yLCB7fSldIH0pKSwgX2pzeChDb250ZXh0TWVudUl0ZW0sIHsgb25TZWxlY3Q6ICgpID0+IHZvaWQgY29weUZpbGVQYXRoKHBhdGgpLCBjaGlsZHJlbjogbS5jb3B5UGF0aCB9KSwgcmVsYXRpdmVUbyAmJiAoX2pzeChDb250ZXh0TWVudUl0ZW0sIHsgb25TZWxlY3Q6ICgpID0+IHZvaWQgY29weUZpbGVQYXRoKHRvUmVsYXRpdmVQYXRoKHBhdGgsIHJlbGF0aXZlVG8pKSwgY2hpbGRyZW46IG0uY29weVJlbGF0aXZlUGF0aCB9KSksIGxvY2FsRnMgJiYgKF9qc3hzKF9GcmFnbWVudCwgeyBjaGlsZHJlbjogW19qc3goQ29udGV4dE1lbnVTZXBhcmF0b3IsIHt9KSwgX2pzeChDb250ZXh0TWVudUl0ZW0sIHsgb25TZWxlY3Q6ICgpID0+IGJlZ2luSW5saW5lUmVuYW1lKHBhdGgpLCBjaGlsZHJlbjogbS5yZW5hbWUgfSksIF9qc3goQ29udGV4dE1lbnVJdGVtLCB7IG9uU2VsZWN0OiAoKSA9PiByZXF1ZXN0RmlsZURlbGV0ZSh0YXJnZXQpLCB2YXJpYW50OiBcImRlc3RydWN0aXZlXCIsIGNoaWxkcmVuOiBtLmRlbGV0ZSB9KV0gfSkpXSB9KV0gfSkpO1xufVxuLyoqIE1vdW50ZWQgb25jZSBuZWFyIHRoZSBhcHAgcm9vdDogdGhlIGRlbGV0ZSBjb25maXJtIGRpYWxvZyBmb3Igc2hhcmVkIGZpbGVcbiAqICBhY3Rpb25zLiBSZW5hbWUgaXMgaW5saW5lIChzZWUge0BsaW5rIElubGluZVJlbmFtZUlucHV0fSkuICovXG5leHBvcnQgZnVuY3Rpb24gRmlsZUFjdGlvbkRpYWxvZ3MoKSB7XG4gICAgY29uc3QgeyB0IH0gPSB1c2VJMThuKCk7XG4gICAgY29uc3QgZGlhbG9nID0gdXNlU3RvcmUoJGZpbGVBY3Rpb25EaWFsb2cpO1xuICAgIGNvbnN0IGRlbGV0aW5nID0gZGlhbG9nPy5raW5kID09PSAnZGVsZXRlJztcbiAgICByZXR1cm4gKF9qc3goQ29uZmlybURpYWxvZywgeyBjb25maXJtTGFiZWw6IHQuZmlsZU1lbnUuZGVsZXRlLCBkZXNjcmlwdGlvbjogdC5maWxlTWVudS5kZWxldGVCb2R5LCBkZXN0cnVjdGl2ZTogdHJ1ZSwgb25DbG9zZTogY2xvc2VGaWxlQWN0aW9uRGlhbG9nLCBvbkNvbmZpcm06ICgpID0+IHtcbiAgICAgICAgICAgIGlmIChkZWxldGluZykge1xuICAgICAgICAgICAgICAgIHJldHVybiBleGVjdXRlRmlsZURlbGV0ZShkaWFsb2cucGF0aCk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH0sIG9wZW46IGRlbGV0aW5nLCB0aXRsZTogZGVsZXRpbmcgPyB0LmZpbGVNZW51LmRlbGV0ZVRpdGxlKGRpYWxvZy5uYW1lKSA6ICcnIH0pKTtcbn1cbi8qKiBUaGUgaW4tcm93IHJlbmFtZSBlZGl0b3IgKFZTIENvZGUgc3R5bGUpOiBzZWVkZWQgd2l0aCB0aGUgbmFtZSAoc3RlbVxuICogIHByZS1zZWxlY3RlZCksIGNvbW1pdHMgb24gRW50ZXIvYmx1ciwgY2FuY2VscyBvbiBFc2MuIFJlbmRlciBpdCBpbiBwbGFjZSBvZiBhXG4gKiAgcm93J3MgbGFiZWwgd2hlbiBgJHJlbmFtaW5nUGF0aCA9PT0gcGF0aGAuICovXG5leHBvcnQgZnVuY3Rpb24gSW5saW5lUmVuYW1lSW5wdXQoeyBjbGFzc05hbWUsIG5hbWUsIHBhdGggfSkge1xuICAgIGNvbnN0IFt2YWx1ZSwgc2V0VmFsdWVdID0gdXNlU3RhdGUobmFtZSk7XG4gICAgLy8gRW50ZXIgdGhlbiB0aGUgcmVzdWx0aW5nIGJsdXIgbXVzdCBub3QgYm90aCBjb21taXQ7IGxhdGNoIG9uIGZpcnN0IGZpbmlzaC5cbiAgICBjb25zdCBkb25lID0gdXNlUmVmKGZhbHNlKTtcbiAgICAvLyBGb2N1cyBjaHVybiByaWdodCBhZnRlciBtb3VudCAoY29udGV4dC1tZW51IGNsb3NlLCBhcmJvcmlzdCByZWZvY3VzLCB0aGVcbiAgICAvLyBmYWxsLXRocm91Z2ggY2xpY2sgb24gdGhlIHJvdykgd291bGQgYmx1cuKGkmNvbW1pdOKGkmNhbmNlbCBpbnN0YW50bHk7IGlnbm9yZVxuICAgIC8vIGJsdXJzIGluIHRoaXMgd2luZG93IGFuZCBncmFiIGZvY3VzIGJhY2sgaW5zdGVhZC5cbiAgICBjb25zdCBtb3VudGVkQXQgPSB1c2VSZWYoRGF0ZS5ub3coKSk7XG4gICAgY29uc3QgZmluaXNoID0gYXN5bmMgKGNvbW1pdCkgPT4ge1xuICAgICAgICBpZiAoZG9uZS5jdXJyZW50KSB7XG4gICAgICAgICAgICByZXR1cm47XG4gICAgICAgIH1cbiAgICAgICAgZG9uZS5jdXJyZW50ID0gdHJ1ZTtcbiAgICAgICAgY29uc3QgbmV4dCA9IHZhbHVlLnRyaW0oKTtcbiAgICAgICAgaWYgKGNvbW1pdCAmJiBuZXh0ICYmIG5leHQgIT09IG5hbWUpIHtcbiAgICAgICAgICAgIHRyeSB7XG4gICAgICAgICAgICAgICAgYXdhaXQgZXhlY3V0ZUZpbGVSZW5hbWUocGF0aCwgbmV4dCk7XG4gICAgICAgICAgICB9XG4gICAgICAgICAgICBjYXRjaCAoZXJyb3IpIHtcbiAgICAgICAgICAgICAgICBub3RpZnlFcnJvcihlcnJvciwgdHJhbnNsYXRlTm93KCdlcnJvcnMuZ2VuZXJpY0ZhaWx1cmUnKSk7XG4gICAgICAgICAgICB9XG4gICAgICAgIH1cbiAgICAgICAgY2FuY2VsSW5saW5lUmVuYW1lKCk7XG4gICAgfTtcbiAgICByZXR1cm4gKF9qc3goXCJpbnB1dFwiLCB7IFwiYXJpYS1sYWJlbFwiOiB0cmFuc2xhdGVOb3coJ2ZpbGVNZW51LnJlbmFtZUxhYmVsJyksIGF1dG9DYXBpdGFsaXplOiBcIm9mZlwiLCBhdXRvQ29tcGxldGU6IFwib2ZmXCIsIGF1dG9Db3JyZWN0OiBcIm9mZlwiLCBhdXRvRm9jdXM6IHRydWUsIGNsYXNzTmFtZTogY24oJ21pbi13LTAgZmxleC0xIHJvdW5kZWQtc20gYm9yZGVyIGJvcmRlci1bY29sb3ItbWl4KGluX3NyZ2IsdmFyKC0tZHQtY29tcG9zZXItcmluZylfNTUlLHRyYW5zcGFyZW50KV0gYmctKC0tdWktYmctZWxldmF0ZWQpIHB4LTEgcHktMCB0ZXh0LXhzIHRleHQtZm9yZWdyb3VuZCBvdXRsaW5lLW5vbmUnLCBjbGFzc05hbWUpLCBvbkJsdXI6IGV2ZW50ID0+IHtcbiAgICAgICAgICAgIGlmIChEYXRlLm5vdygpIC0gbW91bnRlZEF0LmN1cnJlbnQgPCAyNTApIHtcbiAgICAgICAgICAgICAgICBldmVudC5jdXJyZW50VGFyZ2V0LmZvY3VzKCk7XG4gICAgICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgdm9pZCBmaW5pc2godHJ1ZSk7XG4gICAgICAgIH0sIG9uQ2hhbmdlOiBldmVudCA9PiBzZXRWYWx1ZShldmVudC50YXJnZXQudmFsdWUpLCBvbkNsaWNrOiBldmVudCA9PiBldmVudC5zdG9wUHJvcGFnYXRpb24oKSwgb25Eb3VibGVDbGljazogZXZlbnQgPT4gZXZlbnQuc3RvcFByb3BhZ2F0aW9uKCksIG9uRm9jdXM6IGV2ZW50ID0+IHtcbiAgICAgICAgICAgIGNvbnN0IGRvdCA9IGV2ZW50LmN1cnJlbnRUYXJnZXQudmFsdWUubGFzdEluZGV4T2YoJy4nKTtcbiAgICAgICAgICAgIGV2ZW50LmN1cnJlbnRUYXJnZXQuc2V0U2VsZWN0aW9uUmFuZ2UoMCwgZG90ID4gMCA/IGRvdCA6IGV2ZW50LmN1cnJlbnRUYXJnZXQudmFsdWUubGVuZ3RoKTtcbiAgICAgICAgfSwgb25LZXlEb3duOiBldmVudCA9PiB7XG4gICAgICAgICAgICBldmVudC5zdG9wUHJvcGFnYXRpb24oKTtcbiAgICAgICAgICAgIGlmIChldmVudC5rZXkgPT09ICdFbnRlcicpIHtcbiAgICAgICAgICAgICAgICBldmVudC5wcmV2ZW50RGVmYXVsdCgpO1xuICAgICAgICAgICAgICAgIHZvaWQgZmluaXNoKHRydWUpO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgZWxzZSBpZiAoZXZlbnQua2V5ID09PSAnRXNjYXBlJykge1xuICAgICAgICAgICAgICAgIGV2ZW50LnByZXZlbnREZWZhdWx0KCk7XG4gICAgICAgICAgICAgICAgdm9pZCBmaW5pc2goZmFsc2UpO1xuICAgICAgICAgICAgfVxuICAgICAgICB9LCBzcGVsbENoZWNrOiBmYWxzZSwgdmFsdWU6IHZhbHVlIH0pKTtcbn1cbiJdfQ==

@@ -31,6 +31,8 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 </table>
 
 ---
+![alt text](image-2.png)
+![alt text](image-3.png)
 ![alt text](image.png)
 ## Quick Install
 

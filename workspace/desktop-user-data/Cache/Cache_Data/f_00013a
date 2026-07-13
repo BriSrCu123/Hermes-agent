@@ -1,0 +1,241 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/app/shell/model-edit-submenu.js");const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"]; const _jsxs = __vite__cjsImport0_react_jsxRuntime["jsxs"]; const _Fragment = __vite__cjsImport0_react_jsxRuntime["Fragment"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import { useStore } from "/node_modules/.vite/deps/@nanostores_react.js?v=d550b4c6";
+import { DropdownMenuItem, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem, dropdownMenuRow, dropdownMenuSectionLabel, DropdownMenuSeparator, DropdownMenuSubContent } from "/src/components/ui/dropdown-menu.js";
+import { Switch } from "/src/components/ui/switch.js";
+import { useI18n } from "/src/i18n/index.js";
+import { normalize } from "/src/lib/text.js";
+import { setModelPreset } from "/src/store/model-presets.js";
+import { notifyError } from "/src/store/notifications.js";
+import { $activeSessionId, setCurrentFastMode, setCurrentReasoningEffort } from "/src/store/session.js";
+var _s = $RefreshSig$();
+// Hermes' real reasoning levels (see VALID_REASONING_EFFORTS); `none` is owned
+// by the Thinking toggle, not the radio.
+const EFFORT_OPTIONS = [
+	{
+		value: "minimal",
+		labelKey: "minimal"
+	},
+	{
+		value: "low",
+		labelKey: "low"
+	},
+	{
+		value: "medium",
+		labelKey: "medium"
+	},
+	{
+		value: "high",
+		labelKey: "high"
+	},
+	{
+		value: "xhigh",
+		labelKey: "max"
+	}
+];
+/** Resolve the fast mechanism for a model: prefer the speed=fast parameter
+*  when the backend supports it, else fall back to a `…-fast` sibling model. */
+export function resolveFastControl(model, providerModels, paramSupported, currentFastMode) {
+	if (paramSupported) {
+		return {
+			kind: "param",
+			on: currentFastMode
+		};
+	}
+	if (/-fast$/i.test(model)) {
+		const baseId = model.replace(/-fast$/i, "");
+		// Only a toggle if there's a base to switch back to; otherwise it's a
+		// standalone fast model with no "off" state.
+		return providerModels.includes(baseId) ? {
+			kind: "variant",
+			baseId,
+			fastId: model,
+			on: true
+		} : { kind: "none" };
+	}
+	const fastId = `${model}-fast`;
+	if (providerModels.includes(fastId)) {
+		return {
+			kind: "variant",
+			baseId: model,
+			fastId,
+			on: false
+		};
+	}
+	// Fast isn't natively offered here, but if the session still has the speed
+	// param on (carried over from a previous model), expose the toggle so it can
+	// be turned off rather than stranded.
+	if (currentFastMode) {
+		return {
+			kind: "param",
+			on: true
+		};
+	}
+	return { kind: "none" };
+}
+export function ModelEditSubmenu({ effort, fastControl, isActive, model, onSelectModel, provider, reasoning, requestGateway }) {
+	_s();
+	const { t } = useI18n();
+	const copy = t.shell.modelOptions;
+	const activeSessionId = useStore($activeSessionId);
+	const effortValue = normalizeEffort(effort);
+	const thinkingOn = isThinkingEnabled(effort);
+	// Editing always records the model's global preset; the active model also gets
+	// it pushed onto the live session. Non-active edits stay preset-only — they do
+	// not switch you to that model.
+	const patchReasoning = async (next) => {
+		setModelPreset(provider, model, { effort: next });
+		if (!isActive) {
+			return;
+		}
+		setCurrentReasoningEffort(next);
+		// Preset-only without a session: `isActive` holds for the global/default
+		// row pre-session, and the gateway's `config.set` falls back to global
+		// config when none matches — so don't reach it (preset + optimistic store
+		// are the whole effect). Same guard in applyModelPreset / toggleFast.
+		if (!activeSessionId) {
+			return;
+		}
+		try {
+			await requestGateway("config.set", {
+				key: "reasoning",
+				session_id: activeSessionId,
+				value: next
+			});
+		} catch (err) {
+			setCurrentReasoningEffort(effort);
+			setModelPreset(provider, model, { effort });
+			notifyError(err, copy.updateFailed);
+		}
+	};
+	const toggleFast = (enabled) => {
+		if (fastControl.kind === "variant") {
+			// Fast is a separate model id. Record the choice on the base model's
+			// preset (selectFamily picks the `-fast` sibling later when set), and
+			// only swap models now if this is the active row — inactive edits must
+			// stay preset-only, same as the param path below.
+			setModelPreset(provider, fastControl.baseId, { fast: enabled });
+			if (isActive) {
+				void onSelectModel(enabled ? fastControl.fastId : fastControl.baseId);
+			}
+			return;
+		}
+		if (fastControl.kind === "param") {
+			setModelPreset(provider, model, { fast: enabled });
+			if (!isActive) {
+				return;
+			}
+			setCurrentFastMode(enabled);
+			// Preset-only without a session (see patchReasoning).
+			if (!activeSessionId) {
+				return;
+			}
+			void (async () => {
+				try {
+					await requestGateway("config.set", {
+						key: "fast",
+						session_id: activeSessionId,
+						value: enabled ? "fast" : "normal"
+					});
+				} catch (err) {
+					setCurrentFastMode(!enabled);
+					setModelPreset(provider, model, { fast: !enabled });
+					notifyError(err, copy.fastFailed);
+				}
+			})();
+		}
+	};
+	const hasFast = fastControl.kind !== "none";
+	const fastOn = fastControl.kind === "none" ? false : fastControl.on;
+	return _jsx(DropdownMenuSubContent, {
+		className: "w-52 p-0",
+		sideOffset: 4,
+		children: !hasFast && !reasoning ? _jsx("div", {
+			className: "px-2.5 py-3 text-xs text-(--ui-text-tertiary)",
+			children: copy.noOptions
+		}) : _jsxs(_Fragment, { children: [
+			_jsx(DropdownMenuLabel, {
+				className: dropdownMenuSectionLabel,
+				children: copy.options
+			}),
+			reasoning ? _jsxs(DropdownMenuItem, {
+				className: dropdownMenuRow,
+				onSelect: (event) => event.preventDefault(),
+				children: [copy.thinking, _jsx(Switch, {
+					checked: thinkingOn,
+					className: "ml-auto",
+					onCheckedChange: (checked) => void patchReasoning(checked ? effortValue || "medium" : "none"),
+					size: "xs"
+				})]
+			}) : null,
+			hasFast ? _jsxs(DropdownMenuItem, {
+				className: dropdownMenuRow,
+				onSelect: (event) => event.preventDefault(),
+				children: [copy.fast, _jsx(Switch, {
+					checked: fastOn,
+					className: "ml-auto",
+					onCheckedChange: toggleFast,
+					size: "xs"
+				})]
+			}) : null,
+			reasoning ? _jsxs(_Fragment, { children: [
+				_jsx(DropdownMenuSeparator, { className: "mx-0" }),
+				_jsx(DropdownMenuLabel, {
+					className: dropdownMenuSectionLabel,
+					children: copy.effort
+				}),
+				_jsx(DropdownMenuRadioGroup, {
+					onValueChange: (value) => void patchReasoning(value),
+					value: effortValue,
+					children: EFFORT_OPTIONS.map((option) => _jsx(DropdownMenuRadioItem, {
+						className: dropdownMenuRow,
+						onSelect: (event) => event.preventDefault(),
+						value: option.value,
+						children: copy[option.labelKey]
+					}, option.value))
+				})
+			] }) : null
+		] })
+	});
+}
+_s(ModelEditSubmenu, "csNF0JmMfp1XLbC/44q9cOqHIyM=", false, function() {
+	return [useI18n, useStore];
+});
+_c = ModelEditSubmenu;
+function isThinkingEnabled(effort) {
+	// Empty = Hermes default (medium) = on; only an explicit "none" is off.
+	return normalize(effort || "medium") !== "none";
+}
+function normalizeEffort(effort) {
+	const value = normalize(effort || "medium");
+	// Thinking off → no effort selected in the radio group.
+	if (value === "none") {
+		return "";
+	}
+	return EFFORT_OPTIONS.some((option) => option.value === value) ? value : "medium";
+}
+var _c;
+$RefreshReg$(_c, "ModelEditSubmenu");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/app/shell/model-edit-submenu.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/model-edit-submenu.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/model-edit-submenu.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/app/shell/model-edit-submenu.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,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QUFXLE9BQU8sQ0FBQztJQUFHLEtBQUssbUJBQW1CO0tBQUUsV0FBVztLQUEwQixVQUFVLEtBQUs7SUFBTyxDQUFDO0lBQUcsS0FBSyx3QkFBd0I7S0FBRSxnQkFBZSxVQUFTLEtBQUssZUFBZSxLQUFLO0tBQUcsT0FBTztLQUFhLFVBQVUsZUFBZSxLQUFJLFdBQVcsS0FBSyx1QkFBdUI7TUFBRSxXQUFXO01BQWlCLFdBQVUsVUFBUyxNQUFNLGVBQWU7TUFBRyxPQUFPLE9BQU87TUFBTyxVQUFVLEtBQUssT0FBTztLQUFVLEdBQUcsT0FBTyxLQUFLLENBQUU7SUFBRSxDQUFDO0dBQUMsRUFBRSxDQUFDLElBQUs7RUFBSSxFQUFFLENBQUM7Q0FBRyxDQUFDO0FBQzE0Qzs7Ozs7QUFDQSxTQUFTLGtCQUFrQixRQUFROztDQUUvQixPQUFPLFVBQVUsVUFBVSxRQUFRLE1BQU07QUFDN0M7QUFDQSxTQUFTLGdCQUFnQixRQUFRO0NBQzdCLE1BQU0sUUFBUSxVQUFVLFVBQVUsUUFBUTs7Q0FFMUMsSUFBSSxVQUFVLFFBQVE7RUFDbEIsT0FBTztDQUNYO0NBQ0EsT0FBTyxlQUFlLE1BQUssV0FBVSxPQUFPLFVBQVUsS0FBSyxJQUFJLFFBQVE7QUFDM0UiLCJuYW1lcyI6W10sInNvdXJjZXMiOlsibW9kZWwtZWRpdC1zdWJtZW51LmpzIl0sInZlcnNpb24iOjMsInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB7IGpzeCBhcyBfanN4LCBqc3hzIGFzIF9qc3hzLCBGcmFnbWVudCBhcyBfRnJhZ21lbnQgfSBmcm9tIFwicmVhY3QvanN4LXJ1bnRpbWVcIjtcbmltcG9ydCB7IHVzZVN0b3JlIH0gZnJvbSAnQG5hbm9zdG9yZXMvcmVhY3QnO1xuaW1wb3J0IHsgRHJvcGRvd25NZW51SXRlbSwgRHJvcGRvd25NZW51TGFiZWwsIERyb3Bkb3duTWVudVJhZGlvR3JvdXAsIERyb3Bkb3duTWVudVJhZGlvSXRlbSwgZHJvcGRvd25NZW51Um93LCBkcm9wZG93bk1lbnVTZWN0aW9uTGFiZWwsIERyb3Bkb3duTWVudVNlcGFyYXRvciwgRHJvcGRvd25NZW51U3ViQ29udGVudCB9IGZyb20gJ0AvY29tcG9uZW50cy91aS9kcm9wZG93bi1tZW51JztcbmltcG9ydCB7IFN3aXRjaCB9IGZyb20gJ0AvY29tcG9uZW50cy91aS9zd2l0Y2gnO1xuaW1wb3J0IHsgdXNlSTE4biB9IGZyb20gJ0AvaTE4bic7XG5pbXBvcnQgeyBub3JtYWxpemUgfSBmcm9tICdAL2xpYi90ZXh0JztcbmltcG9ydCB7IHNldE1vZGVsUHJlc2V0IH0gZnJvbSAnQC9zdG9yZS9tb2RlbC1wcmVzZXRzJztcbmltcG9ydCB7IG5vdGlmeUVycm9yIH0gZnJvbSAnQC9zdG9yZS9ub3RpZmljYXRpb25zJztcbmltcG9ydCB7ICRhY3RpdmVTZXNzaW9uSWQsIHNldEN1cnJlbnRGYXN0TW9kZSwgc2V0Q3VycmVudFJlYXNvbmluZ0VmZm9ydCB9IGZyb20gJ0Avc3RvcmUvc2Vzc2lvbic7XG4vLyBIZXJtZXMnIHJlYWwgcmVhc29uaW5nIGxldmVscyAoc2VlIFZBTElEX1JFQVNPTklOR19FRkZPUlRTKTsgYG5vbmVgIGlzIG93bmVkXG4vLyBieSB0aGUgVGhpbmtpbmcgdG9nZ2xlLCBub3QgdGhlIHJhZGlvLlxuY29uc3QgRUZGT1JUX09QVElPTlMgPSBbXG4gICAgeyB2YWx1ZTogJ21pbmltYWwnLCBsYWJlbEtleTogJ21pbmltYWwnIH0sXG4gICAgeyB2YWx1ZTogJ2xvdycsIGxhYmVsS2V5OiAnbG93JyB9LFxuICAgIHsgdmFsdWU6ICdtZWRpdW0nLCBsYWJlbEtleTogJ21lZGl1bScgfSxcbiAgICB7IHZhbHVlOiAnaGlnaCcsIGxhYmVsS2V5OiAnaGlnaCcgfSxcbiAgICB7IHZhbHVlOiAneGhpZ2gnLCBsYWJlbEtleTogJ21heCcgfVxuXTtcbi8qKiBSZXNvbHZlIHRoZSBmYXN0IG1lY2hhbmlzbSBmb3IgYSBtb2RlbDogcHJlZmVyIHRoZSBzcGVlZD1mYXN0IHBhcmFtZXRlclxuICogIHdoZW4gdGhlIGJhY2tlbmQgc3VwcG9ydHMgaXQsIGVsc2UgZmFsbCBiYWNrIHRvIGEgYOKApi1mYXN0YCBzaWJsaW5nIG1vZGVsLiAqL1xuZXhwb3J0IGZ1bmN0aW9uIHJlc29sdmVGYXN0Q29udHJvbChtb2RlbCwgcHJvdmlkZXJNb2RlbHMsIHBhcmFtU3VwcG9ydGVkLCBjdXJyZW50RmFzdE1vZGUpIHtcbiAgICBpZiAocGFyYW1TdXBwb3J0ZWQpIHtcbiAgICAgICAgcmV0dXJuIHsga2luZDogJ3BhcmFtJywgb246IGN1cnJlbnRGYXN0TW9kZSB9O1xuICAgIH1cbiAgICBpZiAoLy1mYXN0JC9pLnRlc3QobW9kZWwpKSB7XG4gICAgICAgIGNvbnN0IGJhc2VJZCA9IG1vZGVsLnJlcGxhY2UoLy1mYXN0JC9pLCAnJyk7XG4gICAgICAgIC8vIE9ubHkgYSB0b2dnbGUgaWYgdGhlcmUncyBhIGJhc2UgdG8gc3dpdGNoIGJhY2sgdG87IG90aGVyd2lzZSBpdCdzIGFcbiAgICAgICAgLy8gc3RhbmRhbG9uZSBmYXN0IG1vZGVsIHdpdGggbm8gXCJvZmZcIiBzdGF0ZS5cbiAgICAgICAgcmV0dXJuIHByb3ZpZGVyTW9kZWxzLmluY2x1ZGVzKGJhc2VJZCkgPyB7IGtpbmQ6ICd2YXJpYW50JywgYmFzZUlkLCBmYXN0SWQ6IG1vZGVsLCBvbjogdHJ1ZSB9IDogeyBraW5kOiAnbm9uZScgfTtcbiAgICB9XG4gICAgY29uc3QgZmFzdElkID0gYCR7bW9kZWx9LWZhc3RgO1xuICAgIGlmIChwcm92aWRlck1vZGVscy5pbmNsdWRlcyhmYXN0SWQpKSB7XG4gICAgICAgIHJldHVybiB7IGtpbmQ6ICd2YXJpYW50JywgYmFzZUlkOiBtb2RlbCwgZmFzdElkLCBvbjogZmFsc2UgfTtcbiAgICB9XG4gICAgLy8gRmFzdCBpc24ndCBuYXRpdmVseSBvZmZlcmVkIGhlcmUsIGJ1dCBpZiB0aGUgc2Vzc2lvbiBzdGlsbCBoYXMgdGhlIHNwZWVkXG4gICAgLy8gcGFyYW0gb24gKGNhcnJpZWQgb3ZlciBmcm9tIGEgcHJldmlvdXMgbW9kZWwpLCBleHBvc2UgdGhlIHRvZ2dsZSBzbyBpdCBjYW5cbiAgICAvLyBiZSB0dXJuZWQgb2ZmIHJhdGhlciB0aGFuIHN0cmFuZGVkLlxuICAgIGlmIChjdXJyZW50RmFzdE1vZGUpIHtcbiAgICAgICAgcmV0dXJuIHsga2luZDogJ3BhcmFtJywgb246IHRydWUgfTtcbiAgICB9XG4gICAgcmV0dXJuIHsga2luZDogJ25vbmUnIH07XG59XG5leHBvcnQgZnVuY3Rpb24gTW9kZWxFZGl0U3VibWVudSh7IGVmZm9ydCwgZmFzdENvbnRyb2wsIGlzQWN0aXZlLCBtb2RlbCwgb25TZWxlY3RNb2RlbCwgcHJvdmlkZXIsIHJlYXNvbmluZywgcmVxdWVzdEdhdGV3YXkgfSkge1xuICAgIGNvbnN0IHsgdCB9ID0gdXNlSTE4bigpO1xuICAgIGNvbnN0IGNvcHkgPSB0LnNoZWxsLm1vZGVsT3B0aW9ucztcbiAgICBjb25zdCBhY3RpdmVTZXNzaW9uSWQgPSB1c2VTdG9yZSgkYWN0aXZlU2Vzc2lvbklkKTtcbiAgICBjb25zdCBlZmZvcnRWYWx1ZSA9IG5vcm1hbGl6ZUVmZm9ydChlZmZvcnQpO1xuICAgIGNvbnN0IHRoaW5raW5nT24gPSBpc1RoaW5raW5nRW5hYmxlZChlZmZvcnQpO1xuICAgIC8vIEVkaXRpbmcgYWx3YXlzIHJlY29yZHMgdGhlIG1vZGVsJ3MgZ2xvYmFsIHByZXNldDsgdGhlIGFjdGl2ZSBtb2RlbCBhbHNvIGdldHNcbiAgICAvLyBpdCBwdXNoZWQgb250byB0aGUgbGl2ZSBzZXNzaW9uLiBOb24tYWN0aXZlIGVkaXRzIHN0YXkgcHJlc2V0LW9ubHkg4oCUIHRoZXkgZG9cbiAgICAvLyBub3Qgc3dpdGNoIHlvdSB0byB0aGF0IG1vZGVsLlxuICAgIGNvbnN0IHBhdGNoUmVhc29uaW5nID0gYXN5bmMgKG5leHQpID0+IHtcbiAgICAgICAgc2V0TW9kZWxQcmVzZXQocHJvdmlkZXIsIG1vZGVsLCB7IGVmZm9ydDogbmV4dCB9KTtcbiAgICAgICAgaWYgKCFpc0FjdGl2ZSkge1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIHNldEN1cnJlbnRSZWFzb25pbmdFZmZvcnQobmV4dCk7XG4gICAgICAgIC8vIFByZXNldC1vbmx5IHdpdGhvdXQgYSBzZXNzaW9uOiBgaXNBY3RpdmVgIGhvbGRzIGZvciB0aGUgZ2xvYmFsL2RlZmF1bHRcbiAgICAgICAgLy8gcm93IHByZS1zZXNzaW9uLCBhbmQgdGhlIGdhdGV3YXkncyBgY29uZmlnLnNldGAgZmFsbHMgYmFjayB0byBnbG9iYWxcbiAgICAgICAgLy8gY29uZmlnIHdoZW4gbm9uZSBtYXRjaGVzIOKAlCBzbyBkb24ndCByZWFjaCBpdCAocHJlc2V0ICsgb3B0aW1pc3RpYyBzdG9yZVxuICAgICAgICAvLyBhcmUgdGhlIHdob2xlIGVmZmVjdCkuIFNhbWUgZ3VhcmQgaW4gYXBwbHlNb2RlbFByZXNldCAvIHRvZ2dsZUZhc3QuXG4gICAgICAgIGlmICghYWN0aXZlU2Vzc2lvbklkKSB7XG4gICAgICAgICAgICByZXR1cm47XG4gICAgICAgIH1cbiAgICAgICAgdHJ5IHtcbiAgICAgICAgICAgIGF3YWl0IHJlcXVlc3RHYXRld2F5KCdjb25maWcuc2V0JywgeyBrZXk6ICdyZWFzb25pbmcnLCBzZXNzaW9uX2lkOiBhY3RpdmVTZXNzaW9uSWQsIHZhbHVlOiBuZXh0IH0pO1xuICAgICAgICB9XG4gICAgICAgIGNhdGNoIChlcnIpIHtcbiAgICAgICAgICAgIHNldEN1cnJlbnRSZWFzb25pbmdFZmZvcnQoZWZmb3J0KTtcbiAgICAgICAgICAgIHNldE1vZGVsUHJlc2V0KHByb3ZpZGVyLCBtb2RlbCwgeyBlZmZvcnQgfSk7XG4gICAgICAgICAgICBub3RpZnlFcnJvcihlcnIsIGNvcHkudXBkYXRlRmFpbGVkKTtcbiAgICAgICAgfVxuICAgIH07XG4gICAgY29uc3QgdG9nZ2xlRmFzdCA9IChlbmFibGVkKSA9PiB7XG4gICAgICAgIGlmIChmYXN0Q29udHJvbC5raW5kID09PSAndmFyaWFudCcpIHtcbiAgICAgICAgICAgIC8vIEZhc3QgaXMgYSBzZXBhcmF0ZSBtb2RlbCBpZC4gUmVjb3JkIHRoZSBjaG9pY2Ugb24gdGhlIGJhc2UgbW9kZWwnc1xuICAgICAgICAgICAgLy8gcHJlc2V0IChzZWxlY3RGYW1pbHkgcGlja3MgdGhlIGAtZmFzdGAgc2libGluZyBsYXRlciB3aGVuIHNldCksIGFuZFxuICAgICAgICAgICAgLy8gb25seSBzd2FwIG1vZGVscyBub3cgaWYgdGhpcyBpcyB0aGUgYWN0aXZlIHJvdyDigJQgaW5hY3RpdmUgZWRpdHMgbXVzdFxuICAgICAgICAgICAgLy8gc3RheSBwcmVzZXQtb25seSwgc2FtZSBhcyB0aGUgcGFyYW0gcGF0aCBiZWxvdy5cbiAgICAgICAgICAgIHNldE1vZGVsUHJlc2V0KHByb3ZpZGVyLCBmYXN0Q29udHJvbC5iYXNlSWQsIHsgZmFzdDogZW5hYmxlZCB9KTtcbiAgICAgICAgICAgIGlmIChpc0FjdGl2ZSkge1xuICAgICAgICAgICAgICAgIHZvaWQgb25TZWxlY3RNb2RlbChlbmFibGVkID8gZmFzdENvbnRyb2wuZmFzdElkIDogZmFzdENvbnRyb2wuYmFzZUlkKTtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgfVxuICAgICAgICBpZiAoZmFzdENvbnRyb2wua2luZCA9PT0gJ3BhcmFtJykge1xuICAgICAgICAgICAgc2V0TW9kZWxQcmVzZXQocHJvdmlkZXIsIG1vZGVsLCB7IGZhc3Q6IGVuYWJsZWQgfSk7XG4gICAgICAgICAgICBpZiAoIWlzQWN0aXZlKSB7XG4gICAgICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgc2V0Q3VycmVudEZhc3RNb2RlKGVuYWJsZWQpO1xuICAgICAgICAgICAgLy8gUHJlc2V0LW9ubHkgd2l0aG91dCBhIHNlc3Npb24gKHNlZSBwYXRjaFJlYXNvbmluZykuXG4gICAgICAgICAgICBpZiAoIWFjdGl2ZVNlc3Npb25JZCkge1xuICAgICAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgICAgIH1cbiAgICAgICAgICAgIHZvaWQgKGFzeW5jICgpID0+IHtcbiAgICAgICAgICAgICAgICB0cnkge1xuICAgICAgICAgICAgICAgICAgICBhd2FpdCByZXF1ZXN0R2F0ZXdheSgnY29uZmlnLnNldCcsIHtcbiAgICAgICAgICAgICAgICAgICAgICAgIGtleTogJ2Zhc3QnLFxuICAgICAgICAgICAgICAgICAgICAgICAgc2Vzc2lvbl9pZDogYWN0aXZlU2Vzc2lvbklkLFxuICAgICAgICAgICAgICAgICAgICAgICAgdmFsdWU6IGVuYWJsZWQgPyAnZmFzdCcgOiAnbm9ybWFsJ1xuICAgICAgICAgICAgICAgICAgICB9KTtcbiAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgICAgY2F0Y2ggKGVycikge1xuICAgICAgICAgICAgICAgICAgICBzZXRDdXJyZW50RmFzdE1vZGUoIWVuYWJsZWQpO1xuICAgICAgICAgICAgICAgICAgICBzZXRNb2RlbFByZXNldChwcm92aWRlciwgbW9kZWwsIHsgZmFzdDogIWVuYWJsZWQgfSk7XG4gICAgICAgICAgICAgICAgICAgIG5vdGlmeUVycm9yKGVyciwgY29weS5mYXN0RmFpbGVkKTtcbiAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICB9KSgpO1xuICAgICAgICB9XG4gICAgfTtcbiAgICBjb25zdCBoYXNGYXN0ID0gZmFzdENvbnRyb2wua2luZCAhPT0gJ25vbmUnO1xuICAgIGNvbnN0IGZhc3RPbiA9IGZhc3RDb250cm9sLmtpbmQgPT09ICdub25lJyA/IGZhbHNlIDogZmFzdENvbnRyb2wub247XG4gICAgcmV0dXJuIChfanN4KERyb3Bkb3duTWVudVN1YkNvbnRlbnQsIHsgY2xhc3NOYW1lOiBcInctNTIgcC0wXCIsIHNpZGVPZmZzZXQ6IDQsIGNoaWxkcmVuOiAhaGFzRmFzdCAmJiAhcmVhc29uaW5nID8gKF9qc3goXCJkaXZcIiwgeyBjbGFzc05hbWU6IFwicHgtMi41IHB5LTMgdGV4dC14cyB0ZXh0LSgtLXVpLXRleHQtdGVydGlhcnkpXCIsIGNoaWxkcmVuOiBjb3B5Lm5vT3B0aW9ucyB9KSkgOiAoX2pzeHMoX0ZyYWdtZW50LCB7IGNoaWxkcmVuOiBbX2pzeChEcm9wZG93bk1lbnVMYWJlbCwgeyBjbGFzc05hbWU6IGRyb3Bkb3duTWVudVNlY3Rpb25MYWJlbCwgY2hpbGRyZW46IGNvcHkub3B0aW9ucyB9KSwgcmVhc29uaW5nID8gKF9qc3hzKERyb3Bkb3duTWVudUl0ZW0sIHsgY2xhc3NOYW1lOiBkcm9wZG93bk1lbnVSb3csIG9uU2VsZWN0OiBldmVudCA9PiBldmVudC5wcmV2ZW50RGVmYXVsdCgpLCBjaGlsZHJlbjogW2NvcHkudGhpbmtpbmcsIF9qc3goU3dpdGNoLCB7IGNoZWNrZWQ6IHRoaW5raW5nT24sIGNsYXNzTmFtZTogXCJtbC1hdXRvXCIsIG9uQ2hlY2tlZENoYW5nZTogY2hlY2tlZCA9PiB2b2lkIHBhdGNoUmVhc29uaW5nKGNoZWNrZWQgPyBlZmZvcnRWYWx1ZSB8fCAnbWVkaXVtJyA6ICdub25lJyksIHNpemU6IFwieHNcIiB9KV0gfSkpIDogbnVsbCwgaGFzRmFzdCA/IChfanN4cyhEcm9wZG93bk1lbnVJdGVtLCB7IGNsYXNzTmFtZTogZHJvcGRvd25NZW51Um93LCBvblNlbGVjdDogZXZlbnQgPT4gZXZlbnQucHJldmVudERlZmF1bHQoKSwgY2hpbGRyZW46IFtjb3B5LmZhc3QsIF9qc3goU3dpdGNoLCB7IGNoZWNrZWQ6IGZhc3RPbiwgY2xhc3NOYW1lOiBcIm1sLWF1dG9cIiwgb25DaGVja2VkQ2hhbmdlOiB0b2dnbGVGYXN0LCBzaXplOiBcInhzXCIgfSldIH0pKSA6IG51bGwsIHJlYXNvbmluZyA/IChfanN4cyhfRnJhZ21lbnQsIHsgY2hpbGRyZW46IFtfanN4KERyb3Bkb3duTWVudVNlcGFyYXRvciwgeyBjbGFzc05hbWU6IFwibXgtMFwiIH0pLCBfanN4KERyb3Bkb3duTWVudUxhYmVsLCB7IGNsYXNzTmFtZTogZHJvcGRvd25NZW51U2VjdGlvbkxhYmVsLCBjaGlsZHJlbjogY29weS5lZmZvcnQgfSksIF9qc3goRHJvcGRvd25NZW51UmFkaW9Hcm91cCwgeyBvblZhbHVlQ2hhbmdlOiB2YWx1ZSA9PiB2b2lkIHBhdGNoUmVhc29uaW5nKHZhbHVlKSwgdmFsdWU6IGVmZm9ydFZhbHVlLCBjaGlsZHJlbjogRUZGT1JUX09QVElPTlMubWFwKG9wdGlvbiA9PiAoX2pzeChEcm9wZG93bk1lbnVSYWRpb0l0ZW0sIHsgY2xhc3NOYW1lOiBkcm9wZG93bk1lbnVSb3csIG9uU2VsZWN0OiBldmVudCA9PiBldmVudC5wcmV2ZW50RGVmYXVsdCgpLCB2YWx1ZTogb3B0aW9uLnZhbHVlLCBjaGlsZHJlbjogY29weVtvcHRpb24ubGFiZWxLZXldIH0sIG9wdGlvbi52YWx1ZSkpKSB9KV0gfSkpIDogbnVsbF0gfSkpIH0pKTtcbn1cbmZ1bmN0aW9uIGlzVGhpbmtpbmdFbmFibGVkKGVmZm9ydCkge1xuICAgIC8vIEVtcHR5ID0gSGVybWVzIGRlZmF1bHQgKG1lZGl1bSkgPSBvbjsgb25seSBhbiBleHBsaWNpdCBcIm5vbmVcIiBpcyBvZmYuXG4gICAgcmV0dXJuIG5vcm1hbGl6ZShlZmZvcnQgfHwgJ21lZGl1bScpICE9PSAnbm9uZSc7XG59XG5mdW5jdGlvbiBub3JtYWxpemVFZmZvcnQoZWZmb3J0KSB7XG4gICAgY29uc3QgdmFsdWUgPSBub3JtYWxpemUoZWZmb3J0IHx8ICdtZWRpdW0nKTtcbiAgICAvLyBUaGlua2luZyBvZmYg4oaSIG5vIGVmZm9ydCBzZWxlY3RlZCBpbiB0aGUgcmFkaW8gZ3JvdXAuXG4gICAgaWYgKHZhbHVlID09PSAnbm9uZScpIHtcbiAgICAgICAgcmV0dXJuICcnO1xuICAgIH1cbiAgICByZXR1cm4gRUZGT1JUX09QVElPTlMuc29tZShvcHRpb24gPT4gb3B0aW9uLnZhbHVlID09PSB2YWx1ZSkgPyB2YWx1ZSA6ICdtZWRpdW0nO1xufVxuIl19

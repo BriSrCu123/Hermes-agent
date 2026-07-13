@@ -1,0 +1,185 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/components/gateway-connecting-overlay.js");import.meta.env = {"BASE_URL": "/", "DEV": true, "MODE": "development", "PROD": false, "SSR": false};const _jsx = __vite__cjsImport0_react_jsxRuntime["jsx"]; const _jsxs = __vite__cjsImport0_react_jsxRuntime["jsxs"];const useEffect = __vite__cjsImport2_react["useEffect"]; const useRef = __vite__cjsImport2_react["useRef"]; const useState = __vite__cjsImport2_react["useState"];import __vite__cjsImport0_react_jsxRuntime from "/node_modules/.vite/deps/react_jsx-runtime.js?v=d550b4c6";
+import { useStore } from "/node_modules/.vite/deps/@nanostores_react.js?v=d550b4c6";
+import __vite__cjsImport2_react from "/node_modules/.vite/deps/react.js?v=d550b4c6";
+import { cn } from "/src/lib/utils.js";
+import { $desktopBoot } from "/src/store/boot.js";
+import { $gatewayState } from "/src/store/session.js";
+var _s = $RefreshSig$();
+// Static, always-legible prefix; only TAIL ever scrambles. Splitting them at
+// the render level means no timer logic (even a stale HMR one) can ever
+// scramble "CONN".
+const PREFIX = "CONN";
+const TAIL = "ECTING";
+// Even-weight mono ascii so cycling glyphs don't jump width (matches the
+// nousnet-web download-button decode effect).
+const SCRAMBLE_CHARS = "/\\|-_=+<>~:*";
+const TICK_MS = 45;
+// Exit choreography (ms): text fades down + out, hold, then the overlay fades.
+const TEXT_OUT_MS = 360;
+const POST_TEXT_HOLD_MS = 300;
+const OVERLAY_OUT_MS = 520;
+// Preview-only: how long to "connect" for, and the pause before replaying.
+const PREVIEW_CONNECT_MS = 2600;
+const PREVIEW_REPLAY_MS = 1100;
+// Dev affordance: a warm Cmd+R reconnects almost instantly, so the overlay
+// only flashes. Load with `?connecting=1` to force a looping preview.
+function forcedPreview() {
+	if (!import.meta.env.DEV || typeof window === "undefined") {
+		return false;
+	}
+	try {
+		return new URLSearchParams(window.location.search).get("connecting") === "1";
+	} catch {
+		return false;
+	}
+}
+function scrambledTail(resolvedCount) {
+	return Array.from(TAIL, (ch, i) => i < resolvedCount ? ch : SCRAMBLE_CHARS[Math.random() * SCRAMBLE_CHARS.length | 0]).join("");
+}
+export function GatewayConnectingOverlay() {
+	_s();
+	const gatewayState = useStore($gatewayState);
+	const boot = useStore($desktopBoot);
+	const [previewing] = useState(forcedPreview);
+	const [tail, setTail] = useState(TAIL);
+	const [phase, setPhase] = useState("live");
+	// The full-screen connecting overlay is for initial boot only. After a
+	// healthy boot, flaky networks / sleep-wake can drop the socket and flip the
+	// gateway state back to closed/error while the app reconnects. Do not cover
+	// the chat then — users should still be able to type drafts, open settings,
+	// and recover instead of staring at a modal CONNECTING screen.
+	const initialBootActive = boot.visible || boot.running || boot.progress < 100;
+	const connecting = gatewayState !== "open" && !boot.error && initialBootActive;
+	// Latches once we've actually shown the overlay, so the brief frame where
+	// gatewayState flips to "open" (connecting -> false) before the exit phase
+	// kicks in doesn't unmount us and cause a flash.
+	const shownRef = useRef(false);
+	if (previewing || connecting) {
+		shownRef.current = true;
+	}
+	// Decode loop — only while live (freeze the resolved word during the exit).
+	useEffect(() => {
+		if (phase !== "live" || !previewing && !connecting) {
+			return;
+		}
+		let resolved = 0;
+		let hold = 0;
+		const id = window.setInterval(() => {
+			if (resolved >= TAIL.length) {
+				hold += 1;
+				if (hold > 16) {
+					resolved = 0;
+					hold = 0;
+				}
+				setTail(TAIL);
+				return;
+			}
+			resolved += .5;
+			setTail(scrambledTail(Math.floor(resolved)));
+		}, TICK_MS);
+		return () => window.clearInterval(id);
+	}, [
+		phase,
+		previewing,
+		connecting
+	]);
+	// Kick off the exit when connected: real connect, or a faked timer in preview.
+	useEffect(() => {
+		if (phase !== "live") {
+			return;
+		}
+		if (previewing) {
+			const id = window.setTimeout(() => {
+				setTail(TAIL);
+				setPhase("text-out");
+			}, PREVIEW_CONNECT_MS);
+			return () => window.clearTimeout(id);
+		}
+		if (gatewayState === "open" && shownRef.current) {
+			setTail(TAIL);
+			setPhase("text-out");
+		}
+	}, [
+		phase,
+		previewing,
+		gatewayState
+	]);
+	// Advance the exit choreography: text-out -> overlay-out -> gone.
+	useEffect(() => {
+		if (phase === "text-out") {
+			const id = window.setTimeout(() => setPhase("overlay-out"), TEXT_OUT_MS + POST_TEXT_HOLD_MS);
+			return () => window.clearTimeout(id);
+		}
+		if (phase === "overlay-out") {
+			const id = window.setTimeout(() => setPhase("gone"), OVERLAY_OUT_MS);
+			return () => window.clearTimeout(id);
+		}
+		// Preview replays so we can keep watching the transition.
+		if (phase === "gone" && previewing) {
+			const id = window.setTimeout(() => {
+				setTail(TAIL);
+				setPhase("live");
+			}, PREVIEW_REPLAY_MS);
+			return () => window.clearTimeout(id);
+		}
+	}, [phase, previewing]);
+	// Boot failed — BootFailureOverlay owns the screen; don't linger behind it.
+	if (boot.error && !previewing) {
+		return null;
+	}
+	// Real connect: once the fade finishes, get out of the way for good.
+	if (phase === "gone" && !previewing) {
+		return null;
+	}
+	// Never showed (e.g. gateway already up on a warm reload) — stay out.
+	if (!previewing && !connecting && !shownRef.current) {
+		return null;
+	}
+	const leaving = phase !== "live";
+	const overlayHidden = phase === "overlay-out" || phase === "gone";
+	return _jsxs("div", {
+		className: cn("fixed inset-0 z-[1200] grid place-items-center bg-(--ui-chat-surface-background) transition-opacity duration-500 ease-out", overlayHidden ? "pointer-events-none opacity-0" : "opacity-100"),
+		children: [_jsx("style", { children: "@keyframes gco-cursor { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }" }), _jsxs("span", {
+			className: cn("inline-flex items-center pl-[0.4em] font-mono text-[0.64rem] font-semibold uppercase tracking-[0.4em] tabular-nums text-(--theme-primary) transition duration-300 ease-out", leaving ? "translate-y-2 opacity-0 saturate-0" : "translate-y-0 opacity-100 saturate-100"),
+			children: [
+				PREFIX,
+				tail,
+				_jsx("span", {
+					"aria-hidden": "true",
+					className: "dither ml-0.5 inline-block size-2 shrink-0 -translate-y-px rounded-[1px]",
+					style: { animation: "gco-cursor 1s step-end infinite" }
+				})
+			]
+		})]
+	});
+}
+_s(GatewayConnectingOverlay, "1KCGpbR1ciTaCKAtTVzTwONs2hs=", false, function() {
+	return [useStore, useStore];
+});
+_c = GatewayConnectingOverlay;
+var _c;
+$RefreshReg$(_c, "GatewayConnectingOverlay");
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from "/src/components/gateway-connecting-overlay.js";
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/gateway-connecting-overlay.js", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/gateway-connecting-overlay.js", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+function $RefreshReg$(type, id) { return RefreshRuntime.register(type, "D:/报告作业/大三小学期/RuyiHermesAgent_v0.1.0/RuyiHermesAgent_v0.1.0/apps/desktop/src/components/gateway-connecting-overlay.js" + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+
+//# sourceMappingURL=data:application/json;base64,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QUFPLGFBQWEsRUFBRTtFQUN2Qzs7RUFFQSxJQUFJLFVBQVUsVUFBVSxZQUFZO0dBQ2hDLE1BQU0sS0FBSyxPQUFPLGlCQUFpQjtJQUMvQixRQUFRLElBQUk7SUFDWixTQUFTLE1BQU07R0FDbkIsR0FBRyxpQkFBaUI7R0FDcEIsYUFBYSxPQUFPLGFBQWEsRUFBRTtFQUN2QztDQUNKLEdBQUcsQ0FBQyxPQUFPLFVBQVUsQ0FBQzs7Q0FFdEIsSUFBSSxLQUFLLFNBQVMsQ0FBQyxZQUFZO0VBQzNCLE9BQU87Q0FDWDs7Q0FFQSxJQUFJLFVBQVUsVUFBVSxDQUFDLFlBQVk7RUFDakMsT0FBTztDQUNYOztDQUVBLElBQUksQ0FBQyxjQUFjLENBQUMsY0FBYyxDQUFDLFNBQVMsU0FBUztFQUNqRCxPQUFPO0NBQ1g7Q0FDQSxNQUFNLFVBQVUsVUFBVTtDQUMxQixNQUFNLGdCQUFnQixVQUFVLGlCQUFpQixVQUFVO0NBQzNELE9BQVEsTUFBTSxPQUFPO0VBQUUsV0FBVyxHQUFHLDZIQUE2SCxnQkFBZ0Isa0NBQWtDLGFBQWE7RUFBRyxVQUFVLENBQUMsS0FBSyxTQUFTLEVBQUUsVUFBVSw0RUFBNEUsQ0FBQyxHQUFHLE1BQU0sUUFBUTtHQUFFLFdBQVcsR0FBRyw4S0FBOEssVUFBVSx1Q0FBdUMsd0NBQXdDO0dBQUcsVUFBVTtJQUFDO0lBQVE7SUFBTSxLQUFLLFFBQVE7S0FBRSxlQUFlO0tBQVEsV0FBVztLQUE0RSxPQUFPLEVBQUUsV0FBVyxrQ0FBa0M7SUFBRSxDQUFDO0dBQUM7RUFBRSxDQUFDLENBQUM7Q0FBRSxDQUFDO0FBQzUxQiIsIm5hbWVzIjpbXSwic291cmNlcyI6WyJnYXRld2F5LWNvbm5lY3Rpbmctb3ZlcmxheS5qcyJdLCJ2ZXJzaW9uIjozLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyBqc3ggYXMgX2pzeCwganN4cyBhcyBfanN4cyB9IGZyb20gXCJyZWFjdC9qc3gtcnVudGltZVwiO1xuaW1wb3J0IHsgdXNlU3RvcmUgfSBmcm9tICdAbmFub3N0b3Jlcy9yZWFjdCc7XG5pbXBvcnQgeyB1c2VFZmZlY3QsIHVzZVJlZiwgdXNlU3RhdGUgfSBmcm9tICdyZWFjdCc7XG5pbXBvcnQgeyBjbiB9IGZyb20gJ0AvbGliL3V0aWxzJztcbmltcG9ydCB7ICRkZXNrdG9wQm9vdCB9IGZyb20gJ0Avc3RvcmUvYm9vdCc7XG5pbXBvcnQgeyAkZ2F0ZXdheVN0YXRlIH0gZnJvbSAnQC9zdG9yZS9zZXNzaW9uJztcbi8vIFN0YXRpYywgYWx3YXlzLWxlZ2libGUgcHJlZml4OyBvbmx5IFRBSUwgZXZlciBzY3JhbWJsZXMuIFNwbGl0dGluZyB0aGVtIGF0XG4vLyB0aGUgcmVuZGVyIGxldmVsIG1lYW5zIG5vIHRpbWVyIGxvZ2ljIChldmVuIGEgc3RhbGUgSE1SIG9uZSkgY2FuIGV2ZXJcbi8vIHNjcmFtYmxlIFwiQ09OTlwiLlxuY29uc3QgUFJFRklYID0gJ0NPTk4nO1xuY29uc3QgVEFJTCA9ICdFQ1RJTkcnO1xuLy8gRXZlbi13ZWlnaHQgbW9ubyBhc2NpaSBzbyBjeWNsaW5nIGdseXBocyBkb24ndCBqdW1wIHdpZHRoIChtYXRjaGVzIHRoZVxuLy8gbm91c25ldC13ZWIgZG93bmxvYWQtYnV0dG9uIGRlY29kZSBlZmZlY3QpLlxuY29uc3QgU0NSQU1CTEVfQ0hBUlMgPSAnL1xcXFx8LV89Kzw+fjoqJztcbmNvbnN0IFRJQ0tfTVMgPSA0NTtcbi8vIEV4aXQgY2hvcmVvZ3JhcGh5IChtcyk6IHRleHQgZmFkZXMgZG93biArIG91dCwgaG9sZCwgdGhlbiB0aGUgb3ZlcmxheSBmYWRlcy5cbmNvbnN0IFRFWFRfT1VUX01TID0gMzYwO1xuY29uc3QgUE9TVF9URVhUX0hPTERfTVMgPSAzMDA7XG5jb25zdCBPVkVSTEFZX09VVF9NUyA9IDUyMDtcbi8vIFByZXZpZXctb25seTogaG93IGxvbmcgdG8gXCJjb25uZWN0XCIgZm9yLCBhbmQgdGhlIHBhdXNlIGJlZm9yZSByZXBsYXlpbmcuXG5jb25zdCBQUkVWSUVXX0NPTk5FQ1RfTVMgPSAyNjAwO1xuY29uc3QgUFJFVklFV19SRVBMQVlfTVMgPSAxMTAwO1xuLy8gRGV2IGFmZm9yZGFuY2U6IGEgd2FybSBDbWQrUiByZWNvbm5lY3RzIGFsbW9zdCBpbnN0YW50bHksIHNvIHRoZSBvdmVybGF5XG4vLyBvbmx5IGZsYXNoZXMuIExvYWQgd2l0aCBgP2Nvbm5lY3Rpbmc9MWAgdG8gZm9yY2UgYSBsb29waW5nIHByZXZpZXcuXG5mdW5jdGlvbiBmb3JjZWRQcmV2aWV3KCkge1xuICAgIGlmICghaW1wb3J0Lm1ldGEuZW52LkRFViB8fCB0eXBlb2Ygd2luZG93ID09PSAndW5kZWZpbmVkJykge1xuICAgICAgICByZXR1cm4gZmFsc2U7XG4gICAgfVxuICAgIHRyeSB7XG4gICAgICAgIHJldHVybiBuZXcgVVJMU2VhcmNoUGFyYW1zKHdpbmRvdy5sb2NhdGlvbi5zZWFyY2gpLmdldCgnY29ubmVjdGluZycpID09PSAnMSc7XG4gICAgfVxuICAgIGNhdGNoIHtcbiAgICAgICAgcmV0dXJuIGZhbHNlO1xuICAgIH1cbn1cbmZ1bmN0aW9uIHNjcmFtYmxlZFRhaWwocmVzb2x2ZWRDb3VudCkge1xuICAgIHJldHVybiBBcnJheS5mcm9tKFRBSUwsIChjaCwgaSkgPT4gaSA8IHJlc29sdmVkQ291bnQgPyBjaCA6IFNDUkFNQkxFX0NIQVJTWyhNYXRoLnJhbmRvbSgpICogU0NSQU1CTEVfQ0hBUlMubGVuZ3RoKSB8IDBdKS5qb2luKCcnKTtcbn1cbmV4cG9ydCBmdW5jdGlvbiBHYXRld2F5Q29ubmVjdGluZ092ZXJsYXkoKSB7XG4gICAgY29uc3QgZ2F0ZXdheVN0YXRlID0gdXNlU3RvcmUoJGdhdGV3YXlTdGF0ZSk7XG4gICAgY29uc3QgYm9vdCA9IHVzZVN0b3JlKCRkZXNrdG9wQm9vdCk7XG4gICAgY29uc3QgW3ByZXZpZXdpbmddID0gdXNlU3RhdGUoZm9yY2VkUHJldmlldyk7XG4gICAgY29uc3QgW3RhaWwsIHNldFRhaWxdID0gdXNlU3RhdGUoVEFJTCk7XG4gICAgY29uc3QgW3BoYXNlLCBzZXRQaGFzZV0gPSB1c2VTdGF0ZSgnbGl2ZScpO1xuICAgIC8vIFRoZSBmdWxsLXNjcmVlbiBjb25uZWN0aW5nIG92ZXJsYXkgaXMgZm9yIGluaXRpYWwgYm9vdCBvbmx5LiBBZnRlciBhXG4gICAgLy8gaGVhbHRoeSBib290LCBmbGFreSBuZXR3b3JrcyAvIHNsZWVwLXdha2UgY2FuIGRyb3AgdGhlIHNvY2tldCBhbmQgZmxpcCB0aGVcbiAgICAvLyBnYXRld2F5IHN0YXRlIGJhY2sgdG8gY2xvc2VkL2Vycm9yIHdoaWxlIHRoZSBhcHAgcmVjb25uZWN0cy4gRG8gbm90IGNvdmVyXG4gICAgLy8gdGhlIGNoYXQgdGhlbiDigJQgdXNlcnMgc2hvdWxkIHN0aWxsIGJlIGFibGUgdG8gdHlwZSBkcmFmdHMsIG9wZW4gc2V0dGluZ3MsXG4gICAgLy8gYW5kIHJlY292ZXIgaW5zdGVhZCBvZiBzdGFyaW5nIGF0IGEgbW9kYWwgQ09OTkVDVElORyBzY3JlZW4uXG4gICAgY29uc3QgaW5pdGlhbEJvb3RBY3RpdmUgPSBib290LnZpc2libGUgfHwgYm9vdC5ydW5uaW5nIHx8IGJvb3QucHJvZ3Jlc3MgPCAxMDA7XG4gICAgY29uc3QgY29ubmVjdGluZyA9IGdhdGV3YXlTdGF0ZSAhPT0gJ29wZW4nICYmICFib290LmVycm9yICYmIGluaXRpYWxCb290QWN0aXZlO1xuICAgIC8vIExhdGNoZXMgb25jZSB3ZSd2ZSBhY3R1YWxseSBzaG93biB0aGUgb3ZlcmxheSwgc28gdGhlIGJyaWVmIGZyYW1lIHdoZXJlXG4gICAgLy8gZ2F0ZXdheVN0YXRlIGZsaXBzIHRvIFwib3BlblwiIChjb25uZWN0aW5nIC0+IGZhbHNlKSBiZWZvcmUgdGhlIGV4aXQgcGhhc2VcbiAgICAvLyBraWNrcyBpbiBkb2Vzbid0IHVubW91bnQgdXMgYW5kIGNhdXNlIGEgZmxhc2guXG4gICAgY29uc3Qgc2hvd25SZWYgPSB1c2VSZWYoZmFsc2UpO1xuICAgIGlmIChwcmV2aWV3aW5nIHx8IGNvbm5lY3RpbmcpIHtcbiAgICAgICAgc2hvd25SZWYuY3VycmVudCA9IHRydWU7XG4gICAgfVxuICAgIC8vIERlY29kZSBsb29wIOKAlCBvbmx5IHdoaWxlIGxpdmUgKGZyZWV6ZSB0aGUgcmVzb2x2ZWQgd29yZCBkdXJpbmcgdGhlIGV4aXQpLlxuICAgIHVzZUVmZmVjdCgoKSA9PiB7XG4gICAgICAgIGlmIChwaGFzZSAhPT0gJ2xpdmUnIHx8ICghcHJldmlld2luZyAmJiAhY29ubmVjdGluZykpIHtcbiAgICAgICAgICAgIHJldHVybjtcbiAgICAgICAgfVxuICAgICAgICBsZXQgcmVzb2x2ZWQgPSAwO1xuICAgICAgICBsZXQgaG9sZCA9IDA7XG4gICAgICAgIGNvbnN0IGlkID0gd2luZG93LnNldEludGVydmFsKCgpID0+IHtcbiAgICAgICAgICAgIGlmIChyZXNvbHZlZCA+PSBUQUlMLmxlbmd0aCkge1xuICAgICAgICAgICAgICAgIGhvbGQgKz0gMTtcbiAgICAgICAgICAgICAgICBpZiAoaG9sZCA+IDE2KSB7XG4gICAgICAgICAgICAgICAgICAgIHJlc29sdmVkID0gMDtcbiAgICAgICAgICAgICAgICAgICAgaG9sZCA9IDA7XG4gICAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgICAgIHNldFRhaWwoVEFJTCk7XG4gICAgICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICAgICAgfVxuICAgICAgICAgICAgcmVzb2x2ZWQgKz0gMC41O1xuICAgICAgICAgICAgc2V0VGFpbChzY3JhbWJsZWRUYWlsKE1hdGguZmxvb3IocmVzb2x2ZWQpKSk7XG4gICAgICAgIH0sIFRJQ0tfTVMpO1xuICAgICAgICByZXR1cm4gKCkgPT4gd2luZG93LmNsZWFySW50ZXJ2YWwoaWQpO1xuICAgIH0sIFtwaGFzZSwgcHJldmlld2luZywgY29ubmVjdGluZ10pO1xuICAgIC8vIEtpY2sgb2ZmIHRoZSBleGl0IHdoZW4gY29ubmVjdGVkOiByZWFsIGNvbm5lY3QsIG9yIGEgZmFrZWQgdGltZXIgaW4gcHJldmlldy5cbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgICBpZiAocGhhc2UgIT09ICdsaXZlJykge1xuICAgICAgICAgICAgcmV0dXJuO1xuICAgICAgICB9XG4gICAgICAgIGlmIChwcmV2aWV3aW5nKSB7XG4gICAgICAgICAgICBjb25zdCBpZCA9IHdpbmRvdy5zZXRUaW1lb3V0KCgpID0+IHtcbiAgICAgICAgICAgICAgICBzZXRUYWlsKFRBSUwpO1xuICAgICAgICAgICAgICAgIHNldFBoYXNlKCd0ZXh0LW91dCcpO1xuICAgICAgICAgICAgfSwgUFJFVklFV19DT05ORUNUX01TKTtcbiAgICAgICAgICAgIHJldHVybiAoKSA9PiB3aW5kb3cuY2xlYXJUaW1lb3V0KGlkKTtcbiAgICAgICAgfVxuICAgICAgICBpZiAoZ2F0ZXdheVN0YXRlID09PSAnb3BlbicgJiYgc2hvd25SZWYuY3VycmVudCkge1xuICAgICAgICAgICAgc2V0VGFpbChUQUlMKTtcbiAgICAgICAgICAgIHNldFBoYXNlKCd0ZXh0LW91dCcpO1xuICAgICAgICB9XG4gICAgfSwgW3BoYXNlLCBwcmV2aWV3aW5nLCBnYXRld2F5U3RhdGVdKTtcbiAgICAvLyBBZHZhbmNlIHRoZSBleGl0IGNob3Jlb2dyYXBoeTogdGV4dC1vdXQgLT4gb3ZlcmxheS1vdXQgLT4gZ29uZS5cbiAgICB1c2VFZmZlY3QoKCkgPT4ge1xuICAgICAgICBpZiAocGhhc2UgPT09ICd0ZXh0LW91dCcpIHtcbiAgICAgICAgICAgIGNvbnN0IGlkID0gd2luZG93LnNldFRpbWVvdXQoKCkgPT4gc2V0UGhhc2UoJ292ZXJsYXktb3V0JyksIFRFWFRfT1VUX01TICsgUE9TVF9URVhUX0hPTERfTVMpO1xuICAgICAgICAgICAgcmV0dXJuICgpID0+IHdpbmRvdy5jbGVhclRpbWVvdXQoaWQpO1xuICAgICAgICB9XG4gICAgICAgIGlmIChwaGFzZSA9PT0gJ292ZXJsYXktb3V0Jykge1xuICAgICAgICAgICAgY29uc3QgaWQgPSB3aW5kb3cuc2V0VGltZW91dCgoKSA9PiBzZXRQaGFzZSgnZ29uZScpLCBPVkVSTEFZX09VVF9NUyk7XG4gICAgICAgICAgICByZXR1cm4gKCkgPT4gd2luZG93LmNsZWFyVGltZW91dChpZCk7XG4gICAgICAgIH1cbiAgICAgICAgLy8gUHJldmlldyByZXBsYXlzIHNvIHdlIGNhbiBrZWVwIHdhdGNoaW5nIHRoZSB0cmFuc2l0aW9uLlxuICAgICAgICBpZiAocGhhc2UgPT09ICdnb25lJyAmJiBwcmV2aWV3aW5nKSB7XG4gICAgICAgICAgICBjb25zdCBpZCA9IHdpbmRvdy5zZXRUaW1lb3V0KCgpID0+IHtcbiAgICAgICAgICAgICAgICBzZXRUYWlsKFRBSUwpO1xuICAgICAgICAgICAgICAgIHNldFBoYXNlKCdsaXZlJyk7XG4gICAgICAgICAgICB9LCBQUkVWSUVXX1JFUExBWV9NUyk7XG4gICAgICAgICAgICByZXR1cm4gKCkgPT4gd2luZG93LmNsZWFyVGltZW91dChpZCk7XG4gICAgICAgIH1cbiAgICB9LCBbcGhhc2UsIHByZXZpZXdpbmddKTtcbiAgICAvLyBCb290IGZhaWxlZCDigJQgQm9vdEZhaWx1cmVPdmVybGF5IG93bnMgdGhlIHNjcmVlbjsgZG9uJ3QgbGluZ2VyIGJlaGluZCBpdC5cbiAgICBpZiAoYm9vdC5lcnJvciAmJiAhcHJldmlld2luZykge1xuICAgICAgICByZXR1cm4gbnVsbDtcbiAgICB9XG4gICAgLy8gUmVhbCBjb25uZWN0OiBvbmNlIHRoZSBmYWRlIGZpbmlzaGVzLCBnZXQgb3V0IG9mIHRoZSB3YXkgZm9yIGdvb2QuXG4gICAgaWYgKHBoYXNlID09PSAnZ29uZScgJiYgIXByZXZpZXdpbmcpIHtcbiAgICAgICAgcmV0dXJuIG51bGw7XG4gICAgfVxuICAgIC8vIE5ldmVyIHNob3dlZCAoZS5nLiBnYXRld2F5IGFscmVhZHkgdXAgb24gYSB3YXJtIHJlbG9hZCkg4oCUIHN0YXkgb3V0LlxuICAgIGlmICghcHJldmlld2luZyAmJiAhY29ubmVjdGluZyAmJiAhc2hvd25SZWYuY3VycmVudCkge1xuICAgICAgICByZXR1cm4gbnVsbDtcbiAgICB9XG4gICAgY29uc3QgbGVhdmluZyA9IHBoYXNlICE9PSAnbGl2ZSc7XG4gICAgY29uc3Qgb3ZlcmxheUhpZGRlbiA9IHBoYXNlID09PSAnb3ZlcmxheS1vdXQnIHx8IHBoYXNlID09PSAnZ29uZSc7XG4gICAgcmV0dXJuIChfanN4cyhcImRpdlwiLCB7IGNsYXNzTmFtZTogY24oJ2ZpeGVkIGluc2V0LTAgei1bMTIwMF0gZ3JpZCBwbGFjZS1pdGVtcy1jZW50ZXIgYmctKC0tdWktY2hhdC1zdXJmYWNlLWJhY2tncm91bmQpIHRyYW5zaXRpb24tb3BhY2l0eSBkdXJhdGlvbi01MDAgZWFzZS1vdXQnLCBvdmVybGF5SGlkZGVuID8gJ3BvaW50ZXItZXZlbnRzLW5vbmUgb3BhY2l0eS0wJyA6ICdvcGFjaXR5LTEwMCcpLCBjaGlsZHJlbjogW19qc3goXCJzdHlsZVwiLCB7IGNoaWxkcmVuOiAnQGtleWZyYW1lcyBnY28tY3Vyc29yIHsgMCUsIDQ5JSB7IG9wYWNpdHk6IDEgfSA1MCUsIDEwMCUgeyBvcGFjaXR5OiAwIH0gfScgfSksIF9qc3hzKFwic3BhblwiLCB7IGNsYXNzTmFtZTogY24oJ2lubGluZS1mbGV4IGl0ZW1zLWNlbnRlciBwbC1bMC40ZW1dIGZvbnQtbW9ubyB0ZXh0LVswLjY0cmVtXSBmb250LXNlbWlib2xkIHVwcGVyY2FzZSB0cmFja2luZy1bMC40ZW1dIHRhYnVsYXItbnVtcyB0ZXh0LSgtLXRoZW1lLXByaW1hcnkpIHRyYW5zaXRpb24gZHVyYXRpb24tMzAwIGVhc2Utb3V0JywgbGVhdmluZyA/ICd0cmFuc2xhdGUteS0yIG9wYWNpdHktMCBzYXR1cmF0ZS0wJyA6ICd0cmFuc2xhdGUteS0wIG9wYWNpdHktMTAwIHNhdHVyYXRlLTEwMCcpLCBjaGlsZHJlbjogW1BSRUZJWCwgdGFpbCwgX2pzeChcInNwYW5cIiwgeyBcImFyaWEtaGlkZGVuXCI6IFwidHJ1ZVwiLCBjbGFzc05hbWU6IFwiZGl0aGVyIG1sLTAuNSBpbmxpbmUtYmxvY2sgc2l6ZS0yIHNocmluay0wIC10cmFuc2xhdGUteS1weCByb3VuZGVkLVsxcHhdXCIsIHN0eWxlOiB7IGFuaW1hdGlvbjogJ2djby1jdXJzb3IgMXMgc3RlcC1lbmQgaW5maW5pdGUnIH0gfSldIH0pXSB9KSk7XG59XG4iXX0=
