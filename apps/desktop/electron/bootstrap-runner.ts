@@ -49,6 +49,8 @@ function hiddenWindowsChildOptions(options = {}) {
 }
 
 const STAMP_COMMIT_RE = /^[0-9a-f]{7,40}$/i
+const DEFAULT_GITHUB_REPOSITORY = 'NousResearch/hermes-agent'
+const GITHUB_REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
 // Stages flagged needs_user_input=true in the manifest are skipped by the
 // runner (passed -NonInteractive to install.ps1, which the install script
@@ -111,12 +113,36 @@ function cachedScriptPath(hermesHome, commit) {
   return path.join(bootstrapCacheDir(hermesHome), `install-${commit}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
 }
 
-function downloadInstallScript(commit, destPath) {
+function resolveGitHubRepository(repository) {
+  return typeof repository === 'string' && GITHUB_REPOSITORY_RE.test(repository)
+    ? repository
+    : DEFAULT_GITHUB_REPOSITORY
+}
+
+function patchInstallerRepository(scriptPath, repository) {
+  if (repository === DEFAULT_GITHUB_REPOSITORY) {
+    return
+  }
+
+  const source = fs.readFileSync(scriptPath, 'utf8')
+  const patched = source
+    .replace('git@github.com:NousResearch/hermes-agent.git', `git@github.com:${repository}.git`)
+    .replace('https://github.com/NousResearch/hermes-agent.git', `https://github.com/${repository}.git`)
+    .replaceAll('https://github.com/NousResearch/hermes-agent/archive/', `https://github.com/${repository}/archive/`)
+
+  if (patched === source) {
+    throw new Error(`Downloaded installer cannot be configured for GitHub repository ${repository}`)
+  }
+
+  fs.writeFileSync(scriptPath, patched, 'utf8')
+}
+
+function downloadInstallScript(commit, destPath, repository = DEFAULT_GITHUB_REPOSITORY) {
   // Fetch from GitHub raw at the pinned commit. The raw URL with a SHA
   // is immutable (unlike a branch ref), so we don't need integrity
   // verification beyond "did the file we wrote pass a syntax probe."
   const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${commit}/scripts/${scriptName}`
+  const url = `https://raw.githubusercontent.com/${resolveGitHubRepository(repository)}/${commit}/scripts/${scriptName}`
 
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true })
@@ -223,10 +249,13 @@ async function resolveInstallScript({
     )
   }
 
+  const repository = resolveGitHubRepository(installStamp.repository)
+
   const cached = cachedScriptPath(hermesHome, installStamp.commit)
 
   try {
     await fsp.access(cached, fs.constants.R_OK)
+    patchInstallerRepository(cached, repository)
     emit({
       type: 'log',
       line: `[bootstrap] using cached ${installScriptName()} for ${installStamp.commit.slice(0, 12)}`
@@ -239,11 +268,12 @@ async function resolveInstallScript({
 
   emit({
     type: 'log',
-    line: `[bootstrap] fetching ${installScriptName()} for ${installStamp.commit.slice(0, 12)} from GitHub`
+    line: `[bootstrap] fetching ${installScriptName()} for ${installStamp.commit.slice(0, 12)} from GitHub (${repository})`
   })
 
   try {
-    await _download(installStamp.commit, cached)
+    await _download(installStamp.commit, cached, repository)
+    patchInstallerRepository(cached, repository)
     emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
 
     return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }

@@ -11,6 +11,7 @@
  *     "schemaVersion": 1,
  *     "commit":        "<40-char SHA>",
  *     "branch":        "<branch name>",
+ *     "repository":    "<github-owner>/<github-repo>",
  *     "builtAt":       "<ISO 8601 UTC timestamp>",
  *     "dirty":         true|false,
  *     "source":        "ci" | "local"
@@ -77,6 +78,20 @@ function fromLocalGit() {
   }
 }
 
+function normalizeGitHubRepository(value) {
+  if (!value || typeof value !== "string") return null
+  const candidate = value.trim().replace(/^https?:\/\/github\.com\//i, "").replace(/^git@github\.com:/i, "")
+  const match = candidate.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/)
+  return match ? `${match[1]}/${match[2]}` : null
+}
+
+function resolveGitHubRepository() {
+  return (
+    normalizeGitHubRepository(process.env.GITHUB_REPOSITORY) ||
+    normalizeGitHubRepository(tryExec("git config --get remote.origin.url", { cwd: REPO_ROOT }))
+  )
+}
+
 function main() {
   const stamp = fromCI() || fromLocalGit()
   if (!stamp || !stamp.commit) {
@@ -106,6 +121,7 @@ function main() {
     schemaVersion: STAMP_SCHEMA_VERSION,
     commit: stamp.commit,
     branch: stamp.branch,
+    repository: resolveGitHubRepository(),
     builtAt: new Date().toISOString(),
     dirty: stamp.dirty,
     source: stamp.source
