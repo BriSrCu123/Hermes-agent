@@ -49,8 +49,8 @@ function hiddenWindowsChildOptions(options = {}) {
 }
 
 const STAMP_COMMIT_RE = /^[0-9a-f]{7,40}$/i
-const DEFAULT_GITHUB_REPOSITORY = 'NousResearch/hermes-agent'
-const GITHUB_REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const DEFAULT_REPOSITORY = 'BriSrCu123/Hermes-agent'
+const REPOSITORY_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
 
 // Stages flagged needs_user_input=true in the manifest are skipped by the
 // runner (passed -NonInteractive to install.ps1, which the install script
@@ -109,118 +109,106 @@ function installedAgentInstallScript(hermesHome) {
   }
 }
 
-function cachedScriptPath(hermesHome, commit) {
-  return path.join(bootstrapCacheDir(hermesHome), `install-${commit}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
+function repositoryFromInstallStamp(installStamp) {
+  return installStamp && REPOSITORY_RE.test(String(installStamp.repository || ''))
+    ? String(installStamp.repository)
+    : DEFAULT_REPOSITORY
 }
 
-function resolveGitHubRepository(repository) {
-  return typeof repository === 'string' && GITHUB_REPOSITORY_RE.test(repository)
-    ? repository
-    : DEFAULT_GITHUB_REPOSITORY
+function cachedScriptPath(hermesHome, commit, repository = DEFAULT_REPOSITORY) {
+  const repositoryKey = String(repository).replace(/[^A-Za-z0-9._-]/g, '_')
+  return path.join(
+    bootstrapCacheDir(hermesHome),
+    `install-${repositoryKey}-${commit}.${process.platform === 'win32' ? 'ps1' : 'sh'}`
+  )
 }
 
-function patchInstallerRepository(scriptPath, repository) {
-  if (repository === DEFAULT_GITHUB_REPOSITORY) {
-    return
+function rawInstallScriptUrl(repository, commit, scriptName = installScriptName()) {
+  if (!REPOSITORY_RE.test(String(repository || ''))) {
+    throw new Error(`Invalid GitHub repository slug in install stamp: ${repository}`)
   }
-
-  const source = fs.readFileSync(scriptPath, 'utf8')
-  const patched = source
-    .replace('git@github.com:NousResearch/hermes-agent.git', `git@github.com:${repository}.git`)
-    .replace('https://github.com/NousResearch/hermes-agent.git', `https://github.com/${repository}.git`)
-    .replaceAll('https://github.com/NousResearch/hermes-agent/archive/', `https://github.com/${repository}/archive/`)
-
-  if (patched === source) {
-    throw new Error(`Downloaded installer cannot be configured for GitHub repository ${repository}`)
+  if (!STAMP_COMMIT_RE.test(String(commit || ''))) {
+    throw new Error(`Invalid install-script commit: ${commit}`)
   }
-
-  fs.writeFileSync(scriptPath, patched, 'utf8')
+  return `https://raw.githubusercontent.com/${repository}/${commit}/scripts/${scriptName}`
 }
 
-function downloadInstallScript(commit, destPath, repository = DEFAULT_GITHUB_REPOSITORY) {
-  // Fetch from GitHub raw at the pinned commit. The raw URL with a SHA
-  // is immutable (unlike a branch ref), so we don't need integrity
-  // verification beyond "did the file we wrote pass a syntax probe."
-  const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/${resolveGitHubRepository(repository)}/${commit}/scripts/${scriptName}`
+function removePartialDownload(tmpPath) {
+  try {
+    fs.unlinkSync(tmpPath)
+  } catch {
+    void 0
+  }
+}
 
+function downloadInstallScriptOnce(url, destPath, scriptName) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true })
-    const tmpPath = destPath + '.tmp'
+    const tmpPath = `${destPath}.tmp`
+    removePartialDownload(tmpPath)
     const out = fs.createWriteStream(tmpPath)
-    https
-      .get(url, res => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          // GitHub raw shouldn't redirect for a SHA URL, but follow once
-          // defensively.
-          out.close()
-          fs.unlinkSync(tmpPath)
-          https
-            .get(res.headers.location, res2 => {
-              if (res2.statusCode !== 200) {
-                reject(
-                  new Error(
-                    `Failed to download ${scriptName}: HTTP ${res2.statusCode} from redirect ${res.headers.location}`
-                  )
-                )
+    const request = https.get(url, { timeout: 30_000 }, res => {
+      if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+        res.resume()
+        out.close()
+        removePartialDownload(tmpPath)
+        downloadInstallScriptOnce(new URL(res.headers.location, url).toString(), destPath, scriptName).then(resolve, reject)
+        return
+      }
+      if (res.statusCode !== 200) {
+        res.resume()
+        out.close()
+        removePartialDownload(tmpPath)
+        reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${url}`))
+        return
+      }
 
-                return
-              }
-
-              const out2 = fs.createWriteStream(tmpPath)
-              res2.pipe(out2)
-              out2.on('finish', () => {
-                out2.close()
-                fs.renameSync(tmpPath, destPath)
-                resolve(destPath)
-              })
-              out2.on('error', reject)
-            })
-            .on('error', reject)
-
-          return
-        }
-
-        if (res.statusCode !== 200) {
-          out.close()
-
+      res.pipe(out)
+      out.on('finish', () => {
+        out.close(() => {
           try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            void 0
+            fs.renameSync(tmpPath, destPath)
+            resolve(destPath)
+          } catch (error) {
+            removePartialDownload(tmpPath)
+            reject(error)
           }
-
-          reject(new Error(`Failed to download ${scriptName}: HTTP ${res.statusCode} from ${url}`))
-
-          return
-        }
-
-        res.pipe(out)
-        out.on('finish', () => {
-          out.close()
-          fs.renameSync(tmpPath, destPath)
-          resolve(destPath)
-        })
-        out.on('error', err => {
-          try {
-            fs.unlinkSync(tmpPath)
-          } catch {
-            void 0
-          }
-
-          reject(err)
         })
       })
-      .on('error', err => {
-        try {
-          fs.unlinkSync(tmpPath)
-        } catch {
-          void 0
-        }
-
-        reject(err)
+      out.on('error', error => {
+        removePartialDownload(tmpPath)
+        reject(error)
       })
+      res.on('error', error => {
+        removePartialDownload(tmpPath)
+        reject(error)
+      })
+    })
+    request.on('timeout', () => request.destroy(new Error(`Timed out downloading ${scriptName}`)))
+    request.on('error', error => {
+      removePartialDownload(tmpPath)
+      reject(error)
+    })
   })
+}
+
+async function downloadInstallScript(commit, destPath, repository = DEFAULT_REPOSITORY) {
+  const scriptName = installScriptName()
+  const url = rawInstallScriptUrl(repository, commit, scriptName)
+  let lastError
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await downloadInstallScriptOnce(url, destPath, scriptName)
+    } catch (error) {
+      lastError = error
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 800))
+      }
+    }
+  }
+
+  throw lastError
 }
 
 async function resolveInstallScript({
@@ -249,13 +237,12 @@ async function resolveInstallScript({
     )
   }
 
-  const repository = resolveGitHubRepository(installStamp.repository)
+  const repository = repositoryFromInstallStamp(installStamp)
 
-  const cached = cachedScriptPath(hermesHome, installStamp.commit)
+  const cached = cachedScriptPath(hermesHome, installStamp.commit, repository)
 
   try {
     await fsp.access(cached, fs.constants.R_OK)
-    patchInstallerRepository(cached, repository)
     emit({
       type: 'log',
       line: `[bootstrap] using cached ${installScriptName()} for ${installStamp.commit.slice(0, 12)}`
@@ -273,7 +260,6 @@ async function resolveInstallScript({
 
   try {
     await _download(installStamp.commit, cached, repository)
-    patchInstallerRepository(cached, repository)
     emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
 
     return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
@@ -563,7 +549,7 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
 // so the repository stage clones the exact SHA the .exe was tested with
 // instead of falling back to install.ps1's default ($Branch = "main").
 function buildPinArgs(installStamp) {
-  const args = []
+  const args = ['-RepoSlug', repositoryFromInstallStamp(installStamp)]
 
   if (installStamp && installStamp.commit) {
     args.push('-Commit', installStamp.commit)
@@ -577,7 +563,7 @@ function buildPinArgs(installStamp) {
 }
 
 function buildPosixPinArgs({ installStamp, activeRoot, hermesHome }) {
-  const args = ['--dir', activeRoot, '--hermes-home', hermesHome]
+  const args = ['--dir', activeRoot, '--hermes-home', hermesHome, '--repo-slug', repositoryFromInstallStamp(installStamp)]
 
   if (installStamp && installStamp.branch) {
     args.push('--branch', installStamp.branch)

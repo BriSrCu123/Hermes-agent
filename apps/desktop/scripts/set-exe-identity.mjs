@@ -36,13 +36,37 @@
 // otherwise-good build (worst case: stock icon, not a broken app).
 
 import { resolve, join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 import { rcedit } from 'rcedit'
 
 import { isMain } from './utils.mjs'
 
-// Stamp the Hermes icon + identity onto `exe`. Resolves on success, throws on
+function exeIdentityOptions(desktopRoot = resolve(import.meta.dirname, '..')) {
+  const packageJson = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8'))
+  const version = String(packageJson.version || '').trim()
+  const productName = String(packageJson.productName || '').trim()
+
+  if (!/^\d+\.\d+\.\d+(?:[.+-][0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error(`invalid desktop package version: ${version || '<empty>'}`)
+  }
+  if (!productName) throw new Error('desktop package productName is missing')
+
+  return {
+    'file-version': version,
+    'product-version': version,
+    'version-string': {
+      ProductName: productName,
+      FileDescription: `${productName} Desktop`,
+      CompanyName: 'Nous Research',
+      LegalCopyright: 'Copyright (c) 2026 Nous Research',
+      InternalName: `${productName}.exe`,
+      OriginalFilename: `${productName}.exe`
+    }
+  }
+}
+
+// Stamp the desktop icon + identity onto `exe`. Resolves on success, throws on
 // failure. `desktopRoot` defaults to this script's package root so the icon and
 // the rcedit dependency resolve regardless of cwd.
 async function stampExeIdentity(exe, desktopRoot = resolve(import.meta.dirname, '..')) {
@@ -59,20 +83,12 @@ async function stampExeIdentity(exe, desktopRoot = resolve(import.meta.dirname, 
   console.log(`[set-exe-identity] stamping ${exe}`)
   console.log(`[set-exe-identity] icon: ${icon}`)
 
-  await rcedit(exe, {
-    icon,
-    'version-string': {
-      ProductName: 'Hermes',
-      FileDescription: 'Hermes',
-      CompanyName: 'Nous Research',
-      LegalCopyright: 'Copyright (c) 2026 Nous Research'
-    }
-  })
+  await rcedit(exe, { icon, ...exeIdentityOptions(desktopRoot) })
 
   console.log('[set-exe-identity] done — Hermes icon + identity stamped')
 }
 
-export { stampExeIdentity }
+export { exeIdentityOptions, stampExeIdentity }
 
 // CLI entry point: `node scripts/set-exe-identity.mjs <exe>`.
 if (isMain(import.meta.url)) {

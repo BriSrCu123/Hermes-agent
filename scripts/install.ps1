@@ -23,6 +23,8 @@ param(
     # exact ref.  Precedence: Commit > Tag > Branch.
     [string]$Commit = "",
     [string]$Tag = "",
+    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
+    [string]$RepoSlug = $(if ($env:HERMES_REPOSITORY) { $env:HERMES_REPOSITORY } else { "BriSrCu123/Hermes-agent" }),
     [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
     [string]$InstallDir = $(if ($env:HERMES_HOME) { "$env:HERMES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\hermes\hermes-agent" }),
 
@@ -136,8 +138,8 @@ foreach ($tmpVar in @('TEMP', 'TMP')) {
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoUrlSsh = "git@github.com:$RepoSlug.git"
+$RepoUrlHttps = "https://github.com/$RepoSlug.git"
 $RepoArchiveUrl = $RepoUrlHttps -replace '\.git$', ''
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
@@ -1498,10 +1500,14 @@ function Install-Repository {
         if (-not $cloneSuccess) {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Info "SSH failed, trying HTTPS..."
-            try {
-                Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false clone --depth 1 --branch $Branch $RepoUrlHttps $InstallDir }
-                if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
-            } catch { }
+            for ($attempt = 1; $attempt -le 3 -and -not $cloneSuccess; $attempt++) {
+                try {
+                    Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false clone --depth 1 --branch $Branch $RepoUrlHttps $InstallDir }
+                    if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true; break }
+                } catch { }
+                if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
+                if ($attempt -lt 3) { Start-Sleep -Seconds $attempt }
+            }
         }
 
         # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
@@ -1525,7 +1531,17 @@ function Install-Repository {
                 $zipPath = "$env:TEMP\hermes-agent-$zipLabel.zip"
                 $extractPath = "$env:TEMP\hermes-agent-extract"
 
-                Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+                $downloaded = $false
+                for ($attempt = 1; $attempt -le 3 -and -not $downloaded; $attempt++) {
+                    try {
+                        Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+                        $downloaded = $true
+                    } catch {
+                        Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+                        if ($attempt -eq 3) { throw }
+                        Start-Sleep -Seconds $attempt
+                    }
+                }
                 if (Test-Path $extractPath) { Remove-Item -Recurse -Force $extractPath }
                 Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
 

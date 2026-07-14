@@ -94,6 +94,12 @@ import {
 import { createLinkTitleWindow, guardLinkTitleSession, readLinkTitleWindowTitle } from './link-title-window'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import {
+  applyPortableEnvironment,
+  portableUpdateStatus,
+  resolvePortableMode,
+  shouldRegisterDeepLinkProtocol
+} from './portable-mode'
+import {
   buildSessionWindowUrl,
   chatWindowWebPreferences,
   createSessionWindowRegistry,
@@ -126,12 +132,35 @@ import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 
-const USER_DATA_OVERRIDE = process.env.HERMES_DESKTOP_USER_DATA_DIR
+const PORTABLE_MODE = resolvePortableMode()
+
+applyPortableEnvironment(PORTABLE_MODE)
+
+const USER_DATA_OVERRIDE =
+  process.env.HERMES_DESKTOP_USER_DATA_DIR || (PORTABLE_MODE.enabled ? PORTABLE_MODE.userDataDir : undefined)
 
 if (USER_DATA_OVERRIDE) {
   const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
   fs.mkdirSync(resolvedUserData, { recursive: true })
   app.setPath('userData', resolvedUserData)
+}
+
+const PORTABLE_PROBE_PATH = process.env.HERMES_DESKTOP_PORTABLE_PROBE?.trim()
+
+if (PORTABLE_MODE.enabled && PORTABLE_PROBE_PATH && path.isAbsolute(PORTABLE_PROBE_PATH)) {
+  fs.mkdirSync(path.dirname(PORTABLE_PROBE_PATH), { recursive: true })
+  fs.writeFileSync(
+    PORTABLE_PROBE_PATH,
+    JSON.stringify({
+      enabled: true,
+      executableDir: PORTABLE_MODE.executableDir,
+      dataDir: PORTABLE_MODE.dataDir,
+      hermesHome: process.env.HERMES_HOME,
+      userDataDir: app.getPath('userData'),
+      registerDeepLinkProtocol: shouldRegisterDeepLinkProtocol(PORTABLE_MODE)
+    })
+  )
+  app.exit(0)
 }
 
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
@@ -423,7 +452,7 @@ const BOOT_FAKE_STEP_MS = (() => {
   return Math.max(120, raw)
 })()
 
-const APP_NAME = 'Hermes'
+const APP_NAME = 'RuyiHermesAgent'
 const TITLEBAR_HEIGHT = 34
 const MACOS_TRAFFIC_LIGHTS_HEIGHT = 14
 
@@ -8094,23 +8123,35 @@ ipcMain.handle('hermes:terminal:resize', (_event, id, size = {}) => {
 })
 ipcMain.handle('hermes:terminal:dispose', (_event, id) => disposeTerminalSession(String(id || '')))
 
-ipcMain.handle('hermes:updates:check', async () =>
-  checkUpdates().catch(error => ({
+ipcMain.handle('hermes:updates:check', async () => {
+  const portableStatus = portableUpdateStatus(PORTABLE_MODE)
+
+  if (portableStatus) return portableStatus
+
+  return checkUpdates().catch(error => ({
     supported: true,
     branch: readDesktopUpdateConfig().branch,
     error: 'check-failed',
     message: error?.message || String(error),
     fetchedAt: Date.now()
   }))
-)
+})
 
-ipcMain.handle('hermes:updates:apply', async (_event, payload) =>
-  applyUpdates(payload || {}).catch(error => ({
+ipcMain.handle('hermes:updates:apply', async (_event, payload) => {
+  if (PORTABLE_MODE.enabled) {
+    return {
+      ok: false,
+      error: 'portable-build',
+      message: 'Replace the portable executable to update. The adjacent data folder is preserved.'
+    }
+  }
+
+  return applyUpdates(payload || {}).catch(error => ({
     ok: false,
     error: 'apply-failed',
     message: error?.message || String(error)
   }))
-)
+})
 
 ipcMain.handle('hermes:updates:branch:get', async () => readDesktopUpdateConfig())
 
@@ -8164,7 +8205,8 @@ ipcMain.handle('hermes:version', async () => ({
   electronVersion: process.versions.electron,
   nodeVersion: process.versions.node,
   platform: process.platform,
-  hermesRoot: resolveUpdateRoot()
+  hermesRoot: resolveUpdateRoot(),
+  portable: PORTABLE_MODE.enabled
 }))
 
 // ===========================================================================
@@ -8260,6 +8302,14 @@ async function getUninstallSummary() {
 }
 
 async function runDesktopUninstall(mode) {
+  if (PORTABLE_MODE.enabled) {
+    return {
+      ok: false,
+      error: 'portable-build',
+      message: 'Exit RuyiHermesAgent, then delete the portable executable and its adjacent data folder.'
+    }
+  }
+
   let uninstallArgs
 
   try {
@@ -8465,6 +8515,11 @@ ipcMain.handle('hermes:deep-link-ready', () => {
 })
 
 function registerDeepLinkProtocol() {
+  if (!shouldRegisterDeepLinkProtocol(PORTABLE_MODE)) {
+    rememberLog('[portable] skipped hermes:// protocol registration')
+    return
+  }
+
   try {
     if (process.defaultApp && process.argv.length >= 2) {
       // Dev: register with the electron exec path + entry script so the OS can
