@@ -138,6 +138,7 @@ foreach ($tmpVar in @('TEMP', 'TMP')) {
 
 $RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
 $RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoArchiveUrl = $RepoUrlHttps -replace '\.git$', ''
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
 # available, in preference order.  uv discovers both uv-managed and system
@@ -1512,13 +1513,13 @@ function Install-Repository {
                 # for.  GitHub supports archive URLs for commits, tags, and
                 # branches; we honour Commit > Tag > Branch.
                 if ($Commit) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/$Commit.zip"
+                    $zipUrl = "$RepoArchiveUrl/archive/$Commit.zip"
                     $zipLabel = $Commit
                 } elseif ($Tag) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/tags/$Tag.zip"
+                    $zipUrl = "$RepoArchiveUrl/archive/refs/tags/$Tag.zip"
                     $zipLabel = $Tag
                 } else {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
+                    $zipUrl = "$RepoArchiveUrl/archive/refs/heads/$Branch.zip"
                     $zipLabel = $Branch
                 }
                 $zipPath = "$env:TEMP\hermes-agent-$zipLabel.zip"
@@ -1530,21 +1531,29 @@ function Install-Repository {
 
                 # GitHub ZIPs extract to repo-branch/ subdirectory
                 $extractedDir = Get-ChildItem $extractPath -Directory | Select-Object -First 1
-                if ($extractedDir) {
-                    New-Item -ItemType Directory -Force -Path (Split-Path $InstallDir) -ErrorAction SilentlyContinue | Out-Null
-                    Move-Item $extractedDir.FullName $InstallDir -Force
-                    Write-Success "Downloaded and extracted"
-
-                    # Initialize git repo so updates work later
-                    Push-Location $InstallDir
-                    git -c windows.appendAtomically=false init 2>$null
-                    git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
-                    git remote add origin $RepoUrlHttps 2>$null
-                    Pop-Location
-                    Write-Success "Git repo initialized for future updates"
-
-                    $cloneSuccess = $true
+                if (-not $extractedDir) {
+                    throw "GitHub ZIP did not contain a repository directory"
                 }
+
+                # Move-Item can fail on dotfiles from an expanded GitHub archive
+                # (for example .dockerignore) even when the download succeeded.
+                # Robocopy preserves those files and treats exit codes 0-7 as success.
+                New-Item -ItemType Directory -Force -Path $InstallDir -ErrorAction Stop | Out-Null
+                & robocopy $extractedDir.FullName $InstallDir /E /COPY:DAT /R:2 /W:1 /NFL /NDL /NJH /NJS
+                if ($LASTEXITCODE -ge 8) {
+                    throw "Could not copy the extracted GitHub archive (robocopy exit $LASTEXITCODE)"
+                }
+                Write-Success "Downloaded and extracted"
+
+                # Initialize git repo so updates work later
+                Push-Location $InstallDir
+                git -c windows.appendAtomically=false init 2>$null
+                git -c windows.appendAtomically=false config windows.appendAtomically false 2>$null
+                git remote add origin $RepoUrlHttps 2>$null
+                Pop-Location
+                Write-Success "Git repo initialized for future updates"
+
+                $cloneSuccess = $true
 
                 # Cleanup temp files
                 Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
